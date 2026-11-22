@@ -58,6 +58,16 @@ export const auditLogger = (
 
     if (req.path === '/health' || req.path === '/api/health') return;
     if (req.method === 'GET' && req.originalUrl?.startsWith('/api/admin/logs')) return;
+    const cleanAuditPath = (req.originalUrl || req.path || '').split('?')[0] || '';
+    if (
+      cleanAuditPath === '/favicon.ico' ||
+      cleanAuditPath.startsWith('/uploads/') ||
+      cleanAuditPath.startsWith('/api/uploads/') ||
+      cleanAuditPath.startsWith('/stickers/') ||
+      cleanAuditPath.startsWith('/assets/stickers/')
+    ) {
+      return;
+    }
 
     pool
       .execute(

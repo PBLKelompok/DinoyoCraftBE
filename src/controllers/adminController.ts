@@ -79,7 +79,7 @@ export const getDashboardStats = async (_req: Request, res: Response): Promise<v
     let kunjunganWisatawan = Number(visitorRows[0]?.total ?? 0);
     if (kunjunganWisatawan === 0) {
       const [userCountRows] = await pool.execute<any[]>(
-        `SELECT COUNT(*) AS total FROM users WHERE role = 'buyer'`
+        `SELECT COUNT(*) AS total FROM users WHERE role = 'pengunjung'`
       );
       kunjunganWisatawan = Number(userCountRows[0]?.total ?? 0);
     }
@@ -87,7 +87,7 @@ export const getDashboardStats = async (_req: Request, res: Response): Promise<v
     // 5. Transaksi Terbaru
     const [latestOrders] = await pool.execute<any[]>(
       `SELECT 
-        COALESCE(o.tracking_number, CONCAT('INV/', DATE_FORMAT(o.created_at, '%Y/%m/'), LPAD(o.id, 4, '0'))) AS id,
+        CONCAT('INV/', DATE_FORMAT(o.created_at, '%Y/%m/'), LPAD(o.id, 4, '0')) AS id,
         COALESCE(m.store_name, 'Toko Mitra') AS toko,
         CAST(o.total_amount AS UNSIGNED) AS nominal
        FROM orders o
@@ -284,6 +284,7 @@ export const getVerifikasiList = async (_req: Request, res: Response): Promise<v
         m.instagram,
         m.ktp_file_url, 
         m.nib_file_url, 
+        m.sample_product_images,
         m.is_verified,
         m.rejection_reason,
         m.is_active, 
@@ -308,16 +309,27 @@ export const getVerifikasiList = async (_req: Request, res: Response): Promise<v
 export const verifyMitraStore = async (req: Request, res: Response): Promise<void> => {
   try {
     const mitraId = parseInt((req.params as { id: string }).id ?? '0');
-    const { status, reason } = req.body as { status: 'approved' | 'rejected'; reason?: string };
+    const body = req.body as {
+      status: 'approved' | 'rejected' | 'terverifikasi' | 'ditolak';
+      reason?: string;
+      rejection_reason?: string;
+    };
+    const rawStatus = String(body.status || '').toLowerCase();
+    const status: 'approved' | 'rejected' | '' =
+      rawStatus === 'approved' || rawStatus === 'terverifikasi'
+        ? 'approved'
+        : rawStatus === 'rejected' || rawStatus === 'ditolak'
+        ? 'rejected'
+        : '';
 
-    if (!['approved', 'rejected'].includes(status)) {
+    if (!status) {
       sendBadRequest(res, "Status verifikasi harus 'approved' atau 'rejected'.");
       return;
     }
 
     // Cek keberadaan profil mitra
     const [rows] = await pool.execute<any[]>(
-      'SELECT user_id FROM mitra_profiles WHERE id = ?',
+      'SELECT user_id, store_name FROM mitra_profiles WHERE id = ?',
       [mitraId]
     );
 
@@ -327,9 +339,11 @@ export const verifyMitraStore = async (req: Request, res: Response): Promise<voi
     }
 
     const userId = rows[0].user_id;
+    const storeName = rows[0].store_name || 'Toko Mitra';
     const isApproved = status === 'approved';
     const isVerifiedVal = isApproved ? 1 : 2;
-    const rejectionReason = isApproved ? null : (reason?.trim() || 'Dokumen belum lengkap atau tidak sesuai ketentuan.');
+    const rawReason = body.reason ?? body.rejection_reason;
+    const rejectionReason = isApproved ? null : (rawReason?.trim() || 'Dokumen belum lengkap atau tidak sesuai ketentuan.');
 
     // Update status di tabel mitra_profiles
     await pool.execute(
@@ -342,6 +356,22 @@ export const verifyMitraStore = async (req: Request, res: Response): Promise<voi
       'UPDATE users SET is_active = 1, updated_at = NOW() WHERE id = ?',
       [userId]
     );
+
+    // Simpan notifikasi in-app untuk Mitra
+    await pool
+      .execute(
+        `INSERT INTO notifications (user_id, title, message, type, reference_id)
+         VALUES (?, ?, ?, 'mitra', ?)`,
+        [
+          userId,
+          isApproved ? 'Toko Mitra Disetujui!' : 'Pengajuan Toko Mitra Ditolak',
+          isApproved
+            ? `Selamat! Toko "${storeName}" telah diverifikasi admin dan sekarang tampil untuk pelanggan.`
+            : `Pengajuan toko "${storeName}" ditolak: ${rejectionReason}`,
+          mitraId,
+        ]
+      )
+      .catch(() => {});
 
     // Kirim notifikasi realtime via Pusher Channels ke mitra terkait
     try {
@@ -365,6 +395,24 @@ export const verifyMitraStore = async (req: Request, res: Response): Promise<voi
     const message = isApproved
       ? 'Toko mitra berhasil disetujui.'
       : 'Pengajuan toko mitra telah ditolak.';
+
+    res.locals['logCategory'] = 'product_store';
+    res.locals['logEventName'] = isApproved
+      ? 'mitra.verification.approved'
+      : 'mitra.verification.rejected';
+    res.locals['logSeverity'] = isApproved ? 'success' : 'warning';
+    res.locals['logOutcome'] = isApproved ? 'success' : 'info';
+    res.locals['logMessage'] = isApproved
+      ? `Admin menyetujui verifikasi toko Mitra "${storeName}" (Mitra #${mitraId}, User #${userId})`
+      : `Admin menolak pengajuan verifikasi toko Mitra "${storeName}" (Alasan: ${rejectionReason})`;
+    res.locals['logMetadata'] = {
+      mitraId,
+      targetUserId: userId,
+      storeName,
+      status,
+      isVerified: isVerifiedVal,
+      rejectionReason,
+    };
 
     sendSuccess(res, { mitraId, status, rejectionReason }, message);
   } catch (err) {

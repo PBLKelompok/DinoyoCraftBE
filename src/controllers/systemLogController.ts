@@ -51,13 +51,13 @@ const buildLogFilterWhere = (query: Record<string, any>): FilterQueryResult => {
   const range = String(query.range || 'live').toLowerCase();
   let rangeLabel = 'live';
   if (range === '24h') {
-    conditions.push('occurred_at >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 24 HOUR)');
+    conditions.push('occurred_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR)');
     rangeLabel = '24-jam';
   } else if (range === '7d') {
-    conditions.push('occurred_at >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 7 DAY)');
+    conditions.push('occurred_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)');
     rangeLabel = '7-hari';
   } else if (range === '30d' || range === '1m') {
-    conditions.push('occurred_at >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 30 DAY)');
+    conditions.push('occurred_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)');
     rangeLabel = '1-bulan';
   } else if (range === 'custom') {
     rangeLabel = 'kustom';
@@ -349,7 +349,7 @@ export const getSystemLogsSummary = async (req: Request, res: Response): Promise
        WHERE deleted_at IS NULL
          AND acknowledged_at IS NULL
          AND severity IN ('critical', 'error')
-         AND occurred_at >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 15 MINUTE)`
+         AND occurred_at >= DATE_SUB(NOW(), INTERVAL 15 MINUTE)`
     );
 
     const [deletedCountRows]: any = await pool.query(
@@ -515,7 +515,7 @@ export const acknowledgeSystemLog = async (req: Request, res: Response): Promise
 
     const [result]: any = await pool.query(
       `UPDATE system_logs
-       SET acknowledged_at = UTC_TIMESTAMP(), acknowledged_by = ?
+       SET acknowledged_at = NOW(), acknowledged_by = ?
        WHERE event_id = ?`,
       [adminId, eventId]
     );
@@ -691,7 +691,7 @@ export const softDeleteSystemLog = async (req: Request, res: Response): Promise<
 
     await pool.query(
       `UPDATE system_logs
-       SET deleted_at = UTC_TIMESTAMP(), deleted_by = ?, delete_reason = ?
+       SET deleted_at = NOW(), deleted_by = ?, delete_reason = ?
        WHERE event_id = ?`,
       [adminId, String(reason).slice(0, 250), eventId]
     );
@@ -743,7 +743,7 @@ export const bulkDeleteSystemLogs = async (req: Request, res: Response): Promise
       const placeholders = eventIds.map(() => '?').join(',');
       const [result]: any = await pool.query(
         `UPDATE system_logs
-         SET deleted_at = UTC_TIMESTAMP(), deleted_by = ?, delete_reason = ?
+         SET deleted_at = NOW(), deleted_by = ?, delete_reason = ?
          WHERE event_id IN (${placeholders})
            AND category != 'admin_audit'
            AND deleted_at IS NULL`,
@@ -758,7 +758,7 @@ export const bulkDeleteSystemLogs = async (req: Request, res: Response): Promise
 
       const [result]: any = await pool.query(
         `UPDATE system_logs
-         SET deleted_at = UTC_TIMESTAMP(), deleted_by = ?, delete_reason = ?
+         SET deleted_at = NOW(), deleted_by = ?, delete_reason = ?
          ${extraRule}`,
         [adminId, String(reason).slice(0, 250), ...params]
       );

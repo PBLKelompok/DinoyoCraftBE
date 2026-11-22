@@ -5,8 +5,8 @@
 
 import crypto from 'crypto';
 import { Request, Response } from 'express';
-import Pusher from 'pusher';
 import pool from '../config/database.js';
+import { pusher as sharedPusher, isPusherAvailable } from '../utils/pusher.js';
 
 export type LogSeverity = 'debug' | 'info' | 'success' | 'warning' | 'error' | 'critical';
 export type LogOutcome = 'success' | 'failure' | 'pending' | 'info';
@@ -69,29 +69,8 @@ export interface SystemLogEventInput {
   skipPusher?: boolean;
 }
 
-// Inisialisasi Pusher untuk Live Logs Admin
-let pusherClient: Pusher | null = null;
-export const getPusherClient = (): Pusher | null => {
-  if (pusherClient) return pusherClient;
-  const appId = process.env.PUSHER_APP_ID;
-  const key = process.env.PUSHER_KEY || process.env.PUSHER_APP_KEY;
-  const secret = process.env.PUSHER_SECRET || process.env.PUSHER_APP_SECRET;
-  const cluster = process.env.PUSHER_CLUSTER || 'ap1';
-
-  if (!appId || !key || !secret) return null;
-  try {
-    pusherClient = new Pusher({
-      appId,
-      key,
-      secret,
-      cluster,
-      useTLS: true,
-    });
-    return pusherClient;
-  } catch {
-    return null;
-  }
-};
+// Inisialisasi Pusher untuk Live Logs Admin (berbagi circuit breaker dengan src/utils/pusher.ts)
+export const getPusherClient = () => (isPusherAvailable() ? sharedPusher : null);
 
 // Pembuat Event ID yang unik dan berurutan berdasarkan waktu (ULID-like)
 export const generateEventId = (): string => {
@@ -321,7 +300,7 @@ export const ensureSystemLogsSchema = async (): Promise<void> => {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
   `);
 
-  // Bersihkan sisa demo/log legacy SociaBuzz (scbz) dan fake seed error SMTP agar tidak membingungkan
+  // Bersihkan sisa demo/log legacy SociaBuzz (scbz), noise asset 404, Pusher 400 historis, dan burst pre-migrasi
   await pool.query(`
     DELETE FROM system_logs
     WHERE request_id = 'req_demo_ext_01'
@@ -330,6 +309,15 @@ export const ensureSystemLogsSchema = async (): Promise<void> => {
        OR LOWER(COALESCE(error_message, '')) LIKE '%x-callback-token%'
        OR LOWER(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(metadata_json, '$.gateway')), '')) LIKE '%sociabuzz%'
        OR LOWER(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(metadata_json, '$.gateway')), '')) LIKE '%scbz%'
+       OR (event_name = 'external.pusher.publish_failed' AND (message LIKE '%Unexpected status code 400%' OR error_message LIKE '%Unexpected status code 400%'))
+       OR (event_name = 'system.route.not_found' AND (route_template LIKE '/uploads/%' OR route_template = '/favicon.ico'))
+       OR (
+         occurred_at < '2026-11-18 00:00:00'
+         AND (
+           (status_code = 500 AND route_template IN ('/api/chat/contacts', '/api/chat/messages/:id', '/api/chat/send/:id'))
+           OR (event_name = 'mobile.api.server_error' AND (message LIKE '%riwayat pesan%' OR message LIKE '%mengirim pesan%' OR message LIKE '%daftar kontak chat%'))
+         )
+       )
   `);
 
   // Mutakhirkan seed transaksi pending demo lama agar akurat merepresentasikan status pending pembayaran
@@ -419,6 +407,71 @@ export const ensureSystemLogsSchema = async (): Promise<void> => {
     }
   } catch {
     // Abaikan jika tabel orders/transactions belum tersedia pada inisialisasi awal
+  }
+
+  // Catat log pending untuk pendaftaran/akun Mitra yang belum disetujui Admin agar langsung terlihat di System Logs
+  try {
+    const [pendingMitraRows]: any = await pool.query(`
+      SELECT
+        m.id AS mitra_id,
+        m.user_id,
+        m.store_name,
+        m.is_verified,
+        m.rejection_reason,
+        m.created_at,
+        u.name AS owner_name,
+        u.email
+      FROM mitra_profiles m
+      INNER JOIN users u ON u.id = m.user_id
+      WHERE COALESCE(m.is_verified, 0) != 1
+        AND NOT EXISTS (
+          SELECT 1 FROM system_logs sl
+          WHERE sl.user_id = u.id
+            AND sl.outcome = 'pending'
+            AND sl.category IN ('auth', 'product_store')
+            AND sl.deleted_at IS NULL
+        )
+      ORDER BY m.id DESC
+      LIMIT 50
+    `);
+
+    for (const row of pendingMitraRows || []) {
+      const isRejected = Number(row.is_verified) === 2 || Boolean(row.rejection_reason);
+      const storeLabel = row.store_name || row.owner_name || 'Toko Mitra';
+      logSystemEvent({
+        occurredAt: row.created_at ? new Date(row.created_at) : new Date(),
+        category: 'auth',
+        eventName: 'auth.mitra.register_pending',
+        severity: 'info',
+        outcome: 'pending',
+        message: isRejected
+          ? `Pengajuan Mitra "${storeLabel}" (${row.email}) belum disetujui — menunggu perbaikan dokumen & verifikasi ulang Admin (PENDING)`
+          : `Pendaftaran Mitra "${storeLabel}" (${row.email}) berstatus pending — menunggu persetujuan verifikasi Admin (PENDING)`,
+        source: 'backend',
+        service: 'api',
+        http: {
+          method: 'POST',
+          route: '/api/auth/register-mitra',
+          statusCode: 201,
+          durationMs: 0,
+        },
+        correlation: {
+          requestId: `pending_mitra_${row.mitra_id}`,
+          userId: Number(row.user_id),
+          role: 'mitra',
+        },
+        metadata: {
+          mitraId: Number(row.mitra_id),
+          storeName: row.store_name || null,
+          email: row.email,
+          isVerified: Number(row.is_verified ?? 0),
+          verificationStatus: isRejected ? 'rejected_awaiting_resubmission' : 'pending_approval',
+          rejectionReason: row.rejection_reason || null,
+        },
+      }).catch(() => {});
+    }
+  } catch {
+    // Abaikan jika tabel mitra_profiles/users belum tersedia pada inisialisasi awal
   }
 };
 
@@ -791,9 +844,19 @@ export const logHttpRequest = (
   const rawPath = req.originalUrl || req.url || req.path || '/';
   const cleanPath = rawPath.split('?')[0] || '/';
 
-  // Abaikan health check & endpoint polling daftar log admin agar tidak membanjiri stream
+  // Abaikan health check, endpoint polling log admin, serta aset statis sukses agar stream tetap bersih
   if (cleanPath === '/health' || cleanPath === '/api/health') return;
   if (req.method === 'GET' && cleanPath.startsWith('/api/admin/logs') && !cleanPath.endsWith('/export')) {
+    return;
+  }
+  if (
+    res.statusCode < 500 &&
+    (cleanPath === '/favicon.ico' ||
+      cleanPath.startsWith('/uploads/') ||
+      cleanPath.startsWith('/api/uploads/') ||
+      cleanPath.startsWith('/stickers/') ||
+      cleanPath.startsWith('/assets/stickers/'))
+  ) {
     return;
   }
 
