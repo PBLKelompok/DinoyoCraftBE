@@ -7,17 +7,18 @@ import 'dotenv/config';
 import express, { Application, Request, Response } from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
-import rateLimit from 'express-rate-limit';
 import dotenv from 'dotenv';
 import router from './routes/index.js';
 import { notFound, globalErrorHandler } from './middlewares/errorMiddleware.js';
 import { auditLogger, requestIdMiddleware } from './middlewares/auditMiddleware.js';
 import path from 'path';
+import fs from 'fs';
 
 // Load environment variables SEBELUM apapun
 dotenv.config();
 
 const app: Application = express();
+app.set('trust proxy', 1);
 
 // -------------------------------------------------------
 // 1. CORS — Konfigurasi origin ramah Mobile & Web
@@ -45,20 +46,15 @@ app.use(
   })
 );
 
-export const apiLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  limit: 500,
-  standardHeaders: 'draft-8',
-  legacyHeaders: false,
-  // Kecualikan webhook Midtrans agar callback server-to-server tidak pernah kena rate limit (PRD §5.4)
-  skip: (req) =>
-    req.path === '/payments/webhook' || req.originalUrl.startsWith('/api/payments/webhook'),
-  message: {
-    success: false,
-    message: 'Terlalu banyak permintaan dari IP ini, silakan coba lagi setelah 15 menit.',
-  },
-});
-app.use('/api', apiLimiter);
+// Rate limiter TIDAK dipasang global di /api agar auto-fetch / polling data
+// (dashboard, chat, pesanan, dll.) tidak pernah terkena HTTP 429.
+// Limiter hanya dipasang pada endpoint Login & OTP di src/routes/authRoutes.ts.
+export {
+  apiLimiter,
+  loginRateLimiter,
+  otpSendRateLimiter,
+  otpVerifyRateLimiter,
+} from './middlewares/rateLimitMiddleware.js';
 
 // -------------------------------------------------------
 // 3. Body Parsing
@@ -101,6 +97,32 @@ app.use('/uploads', express.static(targetFolder));
 app.use('/api/uploads', express.static(targetFolder));
 app.use('/assets/stickers', express.static(path.join(targetFolder, 'stickers')));
 app.use('/stickers', express.static(path.join(targetFolder, 'stickers')));
+
+// Abaikan request favicon browser agar tidak tercatat sebagai 404 warning
+app.get('/favicon.ico', (_req: Request, res: Response) => {
+  res.status(204).end();
+});
+
+// Fallback gambar bila file lama di tabel seed sudah tidak ada di folder uploads
+const PLACEHOLDER_PNG_BASE64 =
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
+app.use(['/uploads', '/api/uploads'], (req: Request, res: Response, next) => {
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    next();
+    return;
+  }
+  if (!/\.(png|jpe?g|webp|gif|svg)$/i.test(req.path)) {
+    next();
+    return;
+  }
+  const fallbackImg = path.join(targetFolder, 'stickers', 'sticker_clay_crafting.jpg');
+  res.setHeader('Cache-Control', 'public, max-age=3600');
+  if (fs.existsSync(fallbackImg)) {
+    res.sendFile(fallbackImg);
+    return;
+  }
+  res.type('image/png').status(200).send(Buffer.from(PLACEHOLDER_PNG_BASE64, 'base64'));
+});
 
 // -------------------------------------------------------
 // 7. Router Utama

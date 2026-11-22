@@ -11,9 +11,11 @@ const tables = [
     \`gender\` enum('L','P') COLLATE utf8mb4_unicode_ci DEFAULT NULL,
     \`email\` varchar(255) COLLATE utf8mb4_unicode_ci NOT NULL,
     \`password_hash\` varchar(255) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+    \`password_changed_at\` datetime DEFAULT NULL,
     \`role\` enum('admin','mitra','pengunjung') COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'pengunjung',
     \`is_active\` tinyint(1) NOT NULL DEFAULT '1',
     \`token_version\` int UNSIGNED NOT NULL DEFAULT '0',
+    \`two_factor_enabled\` tinyint(1) NOT NULL DEFAULT '0',
     \`google_id\` varchar(255) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
     \`avatar_url\` varchar(500) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
     \`last_seen_at\` datetime DEFAULT NULL,
@@ -41,12 +43,12 @@ const tables = [
     FOREIGN KEY (\`user_id\`) REFERENCES \`users\` (\`id\`) ON DELETE CASCADE
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;`,
 
-  // 3. user_otps (Penyimpanan OTP Persisten)
+  // 3. user_otps (Penyimpanan OTP Persisten: register, reset_password, login, 2fa_enable, 2fa_disable)
   `CREATE TABLE IF NOT EXISTS \`user_otps\` (
     \`id\` int UNSIGNED NOT NULL AUTO_INCREMENT,
     \`user_id\` int UNSIGNED NOT NULL,
     \`otp_code\` varchar(10) NOT NULL,
-    \`otp_type\` enum('register','reset_password','login') NOT NULL DEFAULT 'reset_password',
+    \`otp_type\` varchar(30) NOT NULL DEFAULT 'reset_password',
     \`expires_at\` datetime NOT NULL,
     \`is_used\` tinyint(1) NOT NULL DEFAULT '0',
     \`created_at\` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -228,13 +230,14 @@ const tables = [
     FOREIGN KEY (\`user_id\`) REFERENCES \`users\` (\`id\`) ON DELETE CASCADE
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;`,
 
-  // 13. messages (Live Chat Customer - Mitra)
+  // 13. messages (Live Chat Customer - Mitra - Admin + Rich Context Metadata)
   `CREATE TABLE IF NOT EXISTS \`messages\` (
     \`id\` int UNSIGNED NOT NULL AUTO_INCREMENT,
     \`sender_id\` int UNSIGNED NOT NULL,
     \`receiver_id\` int UNSIGNED NOT NULL,
     \`message\` text COLLATE utf8mb4_unicode_ci NOT NULL,
     \`image_url\` varchar(500) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+    \`metadata\` json DEFAULT NULL,
     \`is_read\` tinyint(1) DEFAULT '0',
     \`created_at\` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
     \`updated_at\` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -367,9 +370,10 @@ const tables = [
   // 25. ai_settings — konfigurasi asisten AI / auto-reply
   `CREATE TABLE IF NOT EXISTS \`ai_settings\` (
     \`id\` int NOT NULL AUTO_INCREMENT,
-    \`is_auto_reply_active\` tinyint(1) DEFAULT '0',
-    \`model_name\` varchar(255) DEFAULT 'gemini-1.5-pro',
-    \`api_key\` varchar(255) DEFAULT NULL,
+    \`is_auto_reply_active\` tinyint(1) DEFAULT '1',
+    \`provider\` varchar(50) DEFAULT NULL,
+    \`model_name\` varchar(255) DEFAULT 'gemini-3.5-flash-lite',
+    \`api_key\` text,
     \`system_prompt\` text,
     PRIMARY KEY (\`id\`)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;`,
@@ -427,130 +431,205 @@ const tables = [
 ];
 
 // Helper aman untuk menambahkan kolom ke tabel yang sudah ada jika belum tersedia
-const ensureColumn = async (tableName: string, columnName: string, columnDef: string) => {
+const ensureColumn = async (
+  tableName: string,
+  columnName: string,
+  columnDef: string,
+  conn: any = db
+) => {
   try {
-    const [cols]: any = await db.query(
+    const [cols]: any = await conn.query(
       `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?`,
       [tableName, columnName]
     );
     if (!cols || cols.length === 0) {
       console.log(`  ➕ Menambahkan kolom [${columnName}] ke tabel [${tableName}]...`);
-      await db.query(`ALTER TABLE \`${tableName}\` ADD COLUMN \`${columnName}\` ${columnDef}`);
+      await conn.query(`ALTER TABLE \`${tableName}\` ADD COLUMN \`${columnName}\` ${columnDef}`);
     }
   } catch (err) {
     console.warn(`  ⚠️ Gagal memeriksa/menambahkan kolom ${columnName} pada ${tableName}:`, err);
   }
 };
 
-const runMigration = async () => {
-  console.log('🚀 Memulai migrasi database DinoyoCraft...');
+// Helper aman untuk menambahkan unique index jika belum ada (tanpa error duplikat)
+const ensureUniqueIndex = async (
+  tableName: string,
+  indexName: string,
+  columnName: string,
+  conn: any = db
+) => {
   try {
-    // 1. Matikan Foreign Key check agar urutan tabel aman
-    await db.query('SET FOREIGN_KEY_CHECKS = 0;');
+    const [idxRows]: any = await conn.query(
+      `SELECT INDEX_NAME FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND INDEX_NAME = ?`,
+      [tableName, indexName]
+    );
+    if (!idxRows || idxRows.length === 0) {
+      await conn.query(`ALTER TABLE \`${tableName}\` ADD UNIQUE KEY \`${indexName}\` (\`${columnName}\`)`);
+    }
+  } catch {
+    // Abaikan jika index sudah ada dengan nama lain
+  }
+};
 
-    // 2. Eksekusi DDL pembuatan seluruh tabel (hanya struktur tabel, tanpa mengubah/mengisi data)
-    console.log('📦 Membuat tabel database (jika belum ada)...');
+/**
+ * Sinkronisasi struktur tabel & kolom secara 100% NON-DESTRUCTIVE.
+ * Aman dijalankan baik saat clone database kosong maupun saat pull di database
+ * rekan tim yang sudah memiliki akun & data transaksi berbeda-beda.
+ */
+export const ensureDatabaseStructure = async (options?: { verbose?: boolean }): Promise<void> => {
+  const verbose = options?.verbose ?? true;
+  if (verbose) {
+    console.log('🚀 Memulai migrasi & sinkronisasi struktur database DinoyoCraft...');
+  }
+
+  const conn = await (db as any).getConnection();
+  try {
+    // 1. Matikan sementara Foreign Key check pada koneksi sesi ini
+    await conn.query('SET FOREIGN_KEY_CHECKS = 0;');
+
+    // 2. Eksekusi DDL pembuatan seluruh tabel (CREATE TABLE IF NOT EXISTS — tidak mengubah data)
+    if (verbose) {
+      console.log('📦 Memastikan seluruh tabel tersedia (CREATE TABLE IF NOT EXISTS)...');
+    }
     for (const tableSql of tables) {
-      await db.query(tableSql);
+      await conn.query(tableSql);
     }
 
-    // 3. Sinkronisasi kolom tambahan non-destructive untuk database yang sudah terisi
-    console.log('🔄 Memeriksa & menyinkronkan kolom tambahan...');
-    await ensureColumn('mitra_profiles', 'rejection_reason', 'TEXT NULL AFTER is_verified');
-    await ensureColumn('mitra_profiles', 'rating', 'DECIMAL(3,2) DEFAULT 0.00 AFTER is_active');
-    await ensureColumn('mitra_profiles', 'total_reviews', 'INT DEFAULT 0 AFTER rating');
+    // 3. Sinkronisasi kolom tambahan non-destructive untuk database eksisting
+    if (verbose) {
+      console.log('🔄 Memeriksa & menambahkan kolom baru yang belum ada (tanpa menyentuh data)...');
+    }
+    await ensureColumn('mitra_profiles', 'rejection_reason', 'TEXT NULL AFTER is_verified', conn);
+    await ensureColumn('mitra_profiles', 'rating', 'DECIMAL(3,2) DEFAULT 0.00 AFTER is_active', conn);
+    await ensureColumn('mitra_profiles', 'total_reviews', 'INT DEFAULT 0 AFTER rating', conn);
+    await ensureColumn('mitra_profiles', 'banner_url', 'VARCHAR(500) NULL AFTER instagram', conn);
+    await ensureColumn('mitra_profiles', 'avatar_url', 'VARCHAR(500) NULL AFTER banner_url', conn);
+    await ensureUniqueIndex('mitra_profiles', 'uq_mitra_user_id', 'user_id', conn);
 
-    await ensureColumn('products', 'weight_gram', 'INT NOT NULL DEFAULT 500 AFTER stock');
-    await ensureColumn('products', 'variants', 'JSON NULL AFTER weight_gram');
-    await ensureColumn('products', 'rating', 'DECIMAL(3,2) DEFAULT 0.00 AFTER image_urls');
-    await ensureColumn('products', 'total_reviews', 'INT DEFAULT 0 AFTER rating');
+    await ensureColumn('products', 'weight_gram', 'INT NOT NULL DEFAULT 500 AFTER stock', conn);
+    await ensureColumn('products', 'variants', 'JSON NULL AFTER weight_gram', conn);
+    await ensureColumn('products', 'rating', 'DECIMAL(3,2) DEFAULT 0.00 AFTER image_urls', conn);
+    await ensureColumn('products', 'total_reviews', 'INT DEFAULT 0 AFTER rating', conn);
+    await ensureColumn('products', 'is_deleted', 'TINYINT(1) DEFAULT 0 AFTER total_reviews', conn);
 
-    await ensureColumn('carts', 'variant', 'VARCHAR(100) NULL AFTER product_id');
+    await ensureColumn('carts', 'variant', 'VARCHAR(100) NULL AFTER product_id', conn);
 
-    await ensureColumn('user_addresses', 'city', 'VARCHAR(100) NULL AFTER full_address');
-    await ensureColumn('user_addresses', 'postal_code', 'VARCHAR(20) NULL AFTER city');
-    await ensureColumn('user_addresses', 'label', "VARCHAR(50) DEFAULT 'Rumah' AFTER postal_code");
+    await ensureColumn('user_addresses', 'city', 'VARCHAR(100) NULL AFTER full_address', conn);
+    await ensureColumn('user_addresses', 'postal_code', 'VARCHAR(20) NULL AFTER city', conn);
+    await ensureColumn('user_addresses', 'label', "VARCHAR(50) DEFAULT 'Rumah' AFTER postal_code", conn);
 
-    await ensureColumn('orders', 'shipping_method', "VARCHAR(100) DEFAULT 'Reguler' AFTER shipping_cost");
-    await ensureColumn('orders', 'customer_notes', 'TEXT NULL AFTER tracking_number');
+    await ensureColumn('orders', 'shipping_method', "VARCHAR(100) DEFAULT 'Reguler' AFTER shipping_cost", conn);
+    await ensureColumn('orders', 'customer_notes', 'TEXT NULL AFTER tracking_number', conn);
 
-    await ensureColumn('transactions', 'payment_token', 'VARCHAR(255) NULL AFTER reference_code');
-    await ensureColumn('transactions', 'inv_id', 'VARCHAR(255) NULL AFTER payment_token');
-    await ensureColumn('transactions', 'payment_url', 'VARCHAR(500) NULL AFTER inv_id');
-    await ensureColumn('transactions', 'qr_string', 'TEXT NULL AFTER payment_url');
-    await ensureColumn('transactions', 'gateway_fee', 'DECIMAL(15,2) NOT NULL DEFAULT 0.00 AFTER qr_string');
+    await ensureColumn('order_items', 'variant', 'VARCHAR(100) NULL AFTER product_id', conn);
 
-    // Kolom Midtrans (PRD_Midtrans_Sandbox §5.1)
-    await ensureColumn('transactions', 'gateway', "VARCHAR(30) NOT NULL DEFAULT 'midtrans' AFTER gateway_fee");
-    await ensureColumn('transactions', 'gateway_order_id', 'VARCHAR(100) NULL AFTER gateway');
-    await ensureColumn('transactions', 'payment_type', 'VARCHAR(50) NULL AFTER gateway_order_id');
-    await ensureColumn('transactions', 'va_number', 'VARCHAR(50) NULL AFTER payment_type');
-    await ensureColumn('transactions', 'bank', 'VARCHAR(30) NULL AFTER va_number');
-    await ensureColumn('transactions', 'expiry_time', 'DATETIME NULL AFTER bank');
-    await ensureColumn('transactions', 'paid_at', 'DATETIME NULL AFTER expiry_time');
-    await ensureColumn('transactions', 'gateway_response', 'JSON NULL AFTER paid_at');
-    await ensureColumn('transactions', 'proof_image_url', 'VARCHAR(500) NULL AFTER notes');
-    // gateway_order_id unik (multiple NULL diizinkan MySQL)
+    await ensureColumn('transactions', 'payment_token', 'VARCHAR(255) NULL AFTER reference_code', conn);
+    await ensureColumn('transactions', 'inv_id', 'VARCHAR(255) NULL AFTER payment_token', conn);
+    await ensureColumn('transactions', 'payment_url', 'VARCHAR(500) NULL AFTER inv_id', conn);
+    await ensureColumn('transactions', 'qr_string', 'TEXT NULL AFTER payment_url', conn);
+    await ensureColumn('transactions', 'gateway_fee', 'DECIMAL(15,2) NOT NULL DEFAULT 0.00 AFTER qr_string', conn);
+    await ensureColumn('transactions', 'gateway', "VARCHAR(30) NOT NULL DEFAULT 'midtrans' AFTER gateway_fee", conn);
+    await ensureColumn('transactions', 'gateway_order_id', 'VARCHAR(100) NULL AFTER gateway', conn);
+    await ensureColumn('transactions', 'payment_type', 'VARCHAR(50) NULL AFTER gateway_order_id', conn);
+    await ensureColumn('transactions', 'va_number', 'VARCHAR(50) NULL AFTER payment_type', conn);
+    await ensureColumn('transactions', 'bank', 'VARCHAR(30) NULL AFTER va_number', conn);
+    await ensureColumn('transactions', 'expiry_time', 'DATETIME NULL AFTER bank', conn);
+    await ensureColumn('transactions', 'paid_at', 'DATETIME NULL AFTER expiry_time', conn);
+    await ensureColumn('transactions', 'gateway_response', 'JSON NULL AFTER paid_at', conn);
+    await ensureColumn('transactions', 'proof_image_url', 'VARCHAR(500) NULL AFTER notes', conn);
+    await ensureUniqueIndex('transactions', 'uq_gateway_order_id', 'gateway_order_id', conn);
+
+    await ensureColumn('users', 'username', 'VARCHAR(50) NULL AFTER name', conn);
+    await ensureColumn('users', 'phone', 'VARCHAR(20) NULL AFTER username', conn);
+    await ensureColumn('users', 'birth_date', 'DATE NULL AFTER phone', conn);
+    await ensureColumn('users', 'gender', "ENUM('L','P') NULL AFTER birth_date", conn);
+    await ensureColumn('users', 'password_changed_at', 'DATETIME NULL DEFAULT NULL AFTER password_hash', conn);
+    await ensureColumn('users', 'token_version', 'INT UNSIGNED NOT NULL DEFAULT 0 AFTER is_active', conn);
+    await ensureColumn('users', 'two_factor_enabled', 'TINYINT(1) NOT NULL DEFAULT 0 AFTER token_version', conn);
+    await ensureColumn('users', 'google_id', 'VARCHAR(255) NULL AFTER two_factor_enabled', conn);
+    await ensureColumn('users', 'avatar_url', 'VARCHAR(500) NULL AFTER google_id', conn);
+    await ensureColumn('users', 'last_seen_at', 'DATETIME NULL DEFAULT NULL AFTER updated_at', conn);
+    await ensureUniqueIndex('users', 'uq_users_username', 'username', conn);
+
+    await ensureColumn('notifications', 'message', 'TEXT NOT NULL AFTER title', conn);
+    await ensureColumn('notifications', 'reference_id', 'INT UNSIGNED NULL AFTER type', conn);
+
+    await ensureColumn('reviews', 'order_item_id', 'INT UNSIGNED NULL AFTER id', conn);
+    await ensureColumn('reviews', 'variant', 'VARCHAR(100) NULL AFTER rating', conn);
+    await ensureColumn('reviews', 'comment', 'TEXT NULL AFTER variant', conn);
+    await ensureColumn('reviews', 'photo_urls', 'JSON NULL AFTER comment', conn);
+    await ensureColumn('reviews', 'helpful_count', 'INT UNSIGNED NOT NULL DEFAULT 0 AFTER photo_urls', conn);
+    await ensureColumn('reviews', 'seller_reply', 'TEXT NULL AFTER helpful_count', conn);
+    await ensureColumn('reviews', 'replied_at', 'DATETIME NULL AFTER seller_reply', conn);
+
+    // Kolom media & metadata preview produk/pesanan di chat
+    await ensureColumn('messages', 'image_url', 'VARCHAR(500) NULL AFTER message', conn);
+    await ensureColumn('messages', 'metadata', 'JSON NULL DEFAULT NULL AFTER image_url', conn);
+
+    // Kolom moderasi (reports & account_deletions) untuk kompatibilitas lintas skema
+    await ensureColumn('reports', 'reporter_name', "VARCHAR(150) NOT NULL DEFAULT '' AFTER reporter_id", conn);
+    await ensureColumn('reports', 'type', "VARCHAR(50) NOT NULL DEFAULT 'toko' AFTER reporter_name", conn);
+    await ensureColumn('reports', 'target_name', "VARCHAR(255) NOT NULL DEFAULT '' AFTER target_id", conn);
+    await ensureColumn('reports', 'resolved_at', 'DATETIME NULL AFTER status', conn);
+
+    await ensureColumn('account_deletions', 'name', "VARCHAR(100) NOT NULL DEFAULT '' AFTER user_id", conn);
+    await ensureColumn('account_deletions', 'email', "VARCHAR(255) NOT NULL DEFAULT '' AFTER name", conn);
+    await ensureColumn('account_deletions', 'resolved_at', 'DATETIME NULL AFTER status', conn);
+    await ensureColumn('account_deletions', 'created_at', 'DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP AFTER resolved_at', conn);
+    await ensureColumn('account_deletions', 'updated_at', 'DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP AFTER created_at', conn);
+
+    // Kolom provider & pelebaran tipe api_key pada ai_settings (non-destruktif)
+    await ensureColumn('ai_settings', 'provider', 'VARCHAR(50) NULL DEFAULT NULL AFTER is_auto_reply_active', conn);
+    await conn.query("ALTER TABLE `ai_settings` MODIFY `api_key` TEXT NULL DEFAULT NULL").catch(() => { });
+
+    // Perluas kolom tipe bertipe ENUM lama menjadi VARCHAR tanpa mengubah isi baris yang sudah ada
+    await conn.query("ALTER TABLE `notifications` MODIFY `type` varchar(50) NOT NULL DEFAULT 'system'").catch(() => { });
+    await conn.query("ALTER TABLE `user_otps` MODIFY `otp_type` varchar(30) NOT NULL DEFAULT 'reset_password'").catch(() => { });
+    await conn.query("ALTER TABLE `reports` MODIFY `reporter_id` int UNSIGNED NULL DEFAULT NULL").catch(() => { });
+    await conn.query("ALTER TABLE `reports` MODIFY `target_id` int UNSIGNED NULL DEFAULT NULL").catch(() => { });
+    await conn.query("ALTER TABLE `account_deletions` MODIFY `user_id` int UNSIGNED NULL DEFAULT NULL").catch(() => { });
+
+    // Bootstrap referensi kategori dasar HANYA JIKA tabel categories benar-benar kosong (fresh clone)
+    // Tidak pernah menyentuh tabel jika sudah ada data kategori di database rekan tim.
     try {
-      await db.query('ALTER TABLE `transactions` ADD UNIQUE KEY `uq_gateway_order_id` (`gateway_order_id`)');
-    } catch { /* sudah ada */ }
+      const [catCount]: any = await conn.query('SELECT COUNT(*) AS total FROM categories');
+      if (Number(catCount?.[0]?.total ?? 0) === 0) {
+        if (verbose) {
+          console.log('🌱 Mengisi kategori dasar keramik untuk database baru (tabel categories kosong)...');
+        }
+        await conn.query(
+          `INSERT INTO categories (id, name, description) VALUES
+           (1, 'Dekorasi', 'Vas, guci, patung, dan hiasan interior keramik Dinoyo'),
+           (2, 'Peralatan Makan', 'Piring, mangkok, cangkir, dan teko keramik food-grade'),
+           (3, 'Souvenir', 'Cendera mata keramik khas Malang untuk acara & hadiah'),
+           (4, 'Pot Tanaman', 'Pot keramik glasir dan terakota untuk tanaman hias')`
+        );
+      }
+    } catch {
+      // Abaikan jika gagal cek/isi kategori awal
+    }
+  } finally {
+    // 4. Hidupkan kembali Foreign Key check pada koneksi sesi ini lalu lepas ke pool
+    await conn.query('SET FOREIGN_KEY_CHECKS = 1;').catch(() => { });
+    conn.release();
+  }
 
-    await ensureColumn('users', 'username', 'VARCHAR(50) NULL AFTER name');
-    await ensureColumn('users', 'phone', 'VARCHAR(20) NULL AFTER username');
-    await ensureColumn('users', 'birth_date', 'DATE NULL AFTER phone');
-    await ensureColumn('users', 'gender', "ENUM('L','P') NULL AFTER birth_date");
-    await ensureColumn('users', 'last_seen_at', 'DATETIME NULL DEFAULT NULL AFTER updated_at');
-    try {
-      await db.query('ALTER TABLE \`users\` ADD UNIQUE KEY \`uq_users_username\` (\`username\`)');
-    } catch { /* sudah ada */ }
+  if (verbose) {
+    console.log('✅ Migrasi & Sinkronisasi Struktur Tabel Berhasil! Seluruh akun & data eksisting tetap utuh.');
+  }
+};
 
-    // Notifications versi lama memakai body/data — kode memakai message/reference_id
-    await ensureColumn('notifications', 'message', 'TEXT NOT NULL AFTER title');
-    await ensureColumn('notifications', 'reference_id', 'INT UNSIGNED NULL AFTER type');
-
-    // Reviews versi lama tidak punya kolom ulasan lengkap
-    await ensureColumn('reviews', 'order_item_id', 'INT UNSIGNED NULL AFTER id');
-    await ensureColumn('reviews', 'variant', 'VARCHAR(100) NULL AFTER rating');
-    await ensureColumn('reviews', 'comment', 'TEXT NULL AFTER variant');
-    await ensureColumn('reviews', 'photo_urls', 'JSON NULL AFTER comment');
-    await ensureColumn('reviews', 'helpful_count', "INT UNSIGNED NOT NULL DEFAULT 0 AFTER photo_urls");
-    await ensureColumn('reviews', 'seller_reply', 'TEXT NULL AFTER helpful_count');
-    await ensureColumn('reviews', 'replied_at', 'DATETIME NULL AFTER seller_reply');
-
-    // Kolom lain yang pernah ditambahkan sepanjang riwayat proyek
-    await ensureColumn('products', 'is_deleted', 'TINYINT(1) DEFAULT 0 AFTER total_reviews');
-    await ensureColumn('mitra_profiles', 'avatar_url', 'VARCHAR(500) NULL AFTER banner_url');
-    await ensureColumn('mitra_profiles', 'banner_url', 'VARCHAR(500) NULL AFTER instagram');
-
-    await ensureColumn('order_items', 'variant', 'VARCHAR(100) NULL AFTER product_id');
-
-    // Kolom media chat untuk tabel messages lama
-    await ensureColumn('messages', 'image_url', 'VARCHAR(500) NULL AFTER message');
-
-    // Kolom moderasi (reports & account_deletions) untuk skema lama
-    await ensureColumn('reports', 'reporter_name', "VARCHAR(150) NOT NULL DEFAULT '' AFTER reporter_id");
-    await ensureColumn('reports', 'type', "VARCHAR(50) NOT NULL DEFAULT 'toko' AFTER reporter_name");
-    await ensureColumn('reports', 'target_name', "VARCHAR(255) NOT NULL DEFAULT '' AFTER target_id");
-    await ensureColumn('reports', 'resolved_at', 'DATETIME NULL AFTER status');
-
-    await ensureColumn('account_deletions', 'name', "VARCHAR(100) NOT NULL DEFAULT '' AFTER user_id");
-    await ensureColumn('account_deletions', 'email', "VARCHAR(255) NOT NULL DEFAULT '' AFTER name");
-    await ensureColumn('account_deletions', 'resolved_at', 'DATETIME NULL AFTER status');
-    await ensureColumn('account_deletions', 'created_at', 'DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP AFTER resolved_at');
-    await ensureColumn('account_deletions', 'updated_at', 'DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP AFTER created_at');
-
-    // Kolom type notifikasi fleksibel (DB lama sempat berupa ENUM yang menolak
-    // nilai baru seperti 'withdrawal').
-    await db.query("ALTER TABLE `notifications` MODIFY `type` varchar(50) NOT NULL DEFAULT 'system'");
-
-    // 4. Hidupkan kembali Foreign Key check
-    await db.query('SET FOREIGN_KEY_CHECKS = 1;');
-    console.log('✅ Migrasi & Sinkronisasi Struktur Tabel Berhasil! Data eksisting tetap aman.');
+const runMigration = async () => {
+  try {
+    await ensureDatabaseStructure({ verbose: true });
   } catch (error) {
     console.error('❌ Terjadi kesalahan saat migrasi:', error);
+    process.exitCode = 1;
   } finally {
     process.exit();
   }
 };
 
-runMigration();
+if (require.main === module) {
+  runMigration();
+}

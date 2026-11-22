@@ -31,6 +31,10 @@ export const pool = mysql.createPool({
   timezone: '+07:00',
 });
 
+pool.on('connection', (conn) => {
+  conn.query("SET time_zone = '+07:00'");
+});
+
 export const sequelize = new Sequelize(dbName, dbUser, dbPassword, {
   host: dbHost,
   port: dbPort,

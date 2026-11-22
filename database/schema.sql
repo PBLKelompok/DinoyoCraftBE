@@ -21,13 +21,19 @@ CREATE TABLE IF NOT EXISTS `users` (
   `id` int UNSIGNED NOT NULL AUTO_INCREMENT,
   `name` varchar(100) COLLATE utf8mb4_unicode_ci NOT NULL,
   `username` varchar(50) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `phone` varchar(20) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `birth_date` date DEFAULT NULL,
+  `gender` enum('L','P') COLLATE utf8mb4_unicode_ci DEFAULT NULL,
   `email` varchar(255) COLLATE utf8mb4_unicode_ci NOT NULL,
   `password_hash` varchar(255) COLLATE utf8mb4_unicode_ci DEFAULT NULL COMMENT 'Hash bcrypt untuk autentikasi kata sandi',
+  `password_changed_at` datetime DEFAULT NULL,
   `role` enum('admin','mitra','pengunjung') COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'pengunjung',
   `is_active` tinyint(1) NOT NULL DEFAULT '1' COMMENT 'Status akun aktif (1) atau dinonaktifkan (0)',
   `token_version` int UNSIGNED NOT NULL DEFAULT '0' COMMENT 'Invalidasi refresh token sesi',
+  `two_factor_enabled` tinyint(1) NOT NULL DEFAULT '0' COMMENT 'Status Autentikasi 2 Langkah (2FA)',
   `google_id` varchar(255) COLLATE utf8mb4_unicode_ci DEFAULT NULL COMMENT 'ID sub Google OAuth 2.0',
   `avatar_url` varchar(500) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `last_seen_at` datetime DEFAULT NULL,
   `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
@@ -64,7 +70,7 @@ CREATE TABLE IF NOT EXISTS `user_otps` (
   `id` int UNSIGNED NOT NULL AUTO_INCREMENT,
   `user_id` int UNSIGNED NOT NULL,
   `otp_code` varchar(10) COLLATE utf8mb4_unicode_ci NOT NULL,
-  `otp_type` enum('register','reset_password','login') COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'reset_password',
+  `otp_type` varchar(30) COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'reset_password',
   `expires_at` datetime NOT NULL,
   `is_used` tinyint(1) NOT NULL DEFAULT '0',
   `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -175,12 +181,21 @@ CREATE TABLE IF NOT EXISTS `transactions` (
   `payment_url` varchar(500) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
   `qr_string` text COLLATE utf8mb4_unicode_ci DEFAULT NULL,
   `gateway_fee` decimal(15,2) NOT NULL DEFAULT '0.00',
+  `gateway` varchar(30) COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'midtrans',
+  `gateway_order_id` varchar(100) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `payment_type` varchar(50) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `va_number` varchar(50) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `bank` varchar(30) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `expiry_time` datetime DEFAULT NULL,
+  `paid_at` datetime DEFAULT NULL,
+  `gateway_response` json DEFAULT NULL,
   `notes` text COLLATE utf8mb4_unicode_ci,
   `proof_image_url` varchar(500) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
   `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   UNIQUE KEY `uq_transactions_reference_code` (`reference_code`),
+  UNIQUE KEY `uq_gateway_order_id` (`gateway_order_id`),
   KEY `idx_transactions_user` (`user_id`),
   CONSTRAINT `fk_transactions_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -261,7 +276,7 @@ CREATE TABLE IF NOT EXISTS `notifications` (
   `user_id` int UNSIGNED NOT NULL,
   `title` varchar(200) COLLATE utf8mb4_unicode_ci NOT NULL,
   `message` text COLLATE utf8mb4_unicode_ci NOT NULL,
-  `type` enum('order','mitra','promo','system') COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'system',
+  `type` varchar(50) COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'system',
   `reference_id` int UNSIGNED DEFAULT NULL,
   `is_read` tinyint(1) NOT NULL DEFAULT '0',
   `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -278,6 +293,8 @@ CREATE TABLE IF NOT EXISTS `messages` (
   `sender_id` int UNSIGNED NOT NULL,
   `receiver_id` int UNSIGNED NOT NULL,
   `message` text COLLATE utf8mb4_unicode_ci NOT NULL COMMENT 'Ciphertext terenkripsi algoritma AES-256-CBC',
+  `image_url` varchar(500) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `metadata` json DEFAULT NULL COMMENT 'Konteks kartu preview produk atau pesanan di chat',
   `is_read` tinyint(1) DEFAULT '0',
   `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -293,16 +310,17 @@ CREATE TABLE IF NOT EXISTS `messages` (
 -- ============================================================
 CREATE TABLE IF NOT EXISTS `reports` (
   `id` int UNSIGNED NOT NULL AUTO_INCREMENT,
-  `reporter_id` int UNSIGNED NOT NULL,
-  `target_type` enum('product','mitra','review','user') COLLATE utf8mb4_unicode_ci NOT NULL,
-  `target_id` int UNSIGNED NOT NULL,
+  `reporter_id` int UNSIGNED DEFAULT NULL,
+  `reporter_name` varchar(150) COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT '',
+  `type` varchar(50) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `target_id` int UNSIGNED DEFAULT NULL,
+  `target_name` varchar(255) COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT '',
   `reason` text COLLATE utf8mb4_unicode_ci NOT NULL,
-  `status` enum('pending','investigating','resolved','dismissed') COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'pending',
+  `status` varchar(50) COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'pending',
+  `resolved_at` datetime DEFAULT NULL,
   `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  PRIMARY KEY (`id`),
-  KEY `idx_reports_reporter` (`reporter_id`),
-  CONSTRAINT `fk_reports_reporter` FOREIGN KEY (`reporter_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
+  PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================
@@ -310,14 +328,15 @@ CREATE TABLE IF NOT EXISTS `reports` (
 -- ============================================================
 CREATE TABLE IF NOT EXISTS `account_deletions` (
   `id` int UNSIGNED NOT NULL AUTO_INCREMENT,
-  `user_id` int UNSIGNED NOT NULL,
-  `reason` text COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `user_id` int UNSIGNED DEFAULT NULL,
+  `name` varchar(100) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `email` varchar(255) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `reason` text COLLATE utf8mb4_unicode_ci NOT NULL,
   `status` enum('pending','approved','rejected') COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'pending',
-  `requested_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  `processed_at` datetime DEFAULT NULL,
-  PRIMARY KEY (`id`),
-  KEY `idx_account_deletions_user` (`user_id`),
-  CONSTRAINT `fk_account_deletions_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
+  `resolved_at` datetime DEFAULT NULL,
+  `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================
@@ -408,6 +427,121 @@ INSERT IGNORE INTO `mitra_profiles` (`id`, `user_id`, `whatsapp_number`, `store_
 INSERT IGNORE INTO `products` (`id`, `mitra_id`, `category_id`, `name`, `description`, `price`, `stock`, `weight_gram`, `image_urls`, `is_deleted`, `created_at`, `updated_at`) VALUES
 (1, 12, 2, 'mangkok', 'mangkok', '200000.00', 12, 500, '["/uploads/1792406168310-495256600.png"]', 0, '2026-10-19 17:36:08', '2026-10-19 17:36:08'),
 (2, 12, 2, 'sasa', 'sasa', '22222.00', 22, 500, '["/uploads/1792406188233-622154251.jpeg"]', 0, '2026-10-19 17:36:28', '2026-10-19 17:36:28');
+
+-- Konfigurasi Asisten AI (idempoten, aman untuk fresh install)
+CREATE TABLE IF NOT EXISTS `ai_settings` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `is_auto_reply_active` tinyint(1) DEFAULT '1',
+  `provider` varchar(50) DEFAULT NULL,
+  `model_name` varchar(255) DEFAULT 'gemini-3.5-flash-lite',
+  `api_key` text,
+  `system_prompt` text,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================================
+-- 19. TABEL RIWAYAT STATUS PESANAN (order_status_history)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS `order_status_history` (
+  `id` int UNSIGNED NOT NULL AUTO_INCREMENT,
+  `order_id` int UNSIGNED NOT NULL,
+  `status` varchar(50) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `tracking_number` varchar(100) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `note` varchar(255) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_osh_order` (`order_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================================
+-- 20. TABEL TOKEN PERANGKAT FCM PUSH NOTIFICATION (user_device_tokens)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS `user_device_tokens` (
+  `id` int UNSIGNED NOT NULL AUTO_INCREMENT,
+  `user_id` int UNSIGNED NOT NULL,
+  `fcm_token` varchar(255) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `platform` varchar(30) COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'android',
+  `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_udt_token` (`fcm_token`),
+  KEY `idx_udt_user` (`user_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================================
+-- 21. TABEL PENGAJUAN PENARIKAN SALDO MITRA (withdrawal_requests)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS `withdrawal_requests` (
+  `id` int UNSIGNED NOT NULL AUTO_INCREMENT,
+  `user_id` int UNSIGNED NOT NULL,
+  `mitra_id` int UNSIGNED NOT NULL,
+  `amount` bigint NOT NULL,
+  `fee` bigint NOT NULL DEFAULT 0,
+  `bank_name` varchar(100) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `account_number` varchar(50) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `account_name` varchar(100) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `status` enum('pending','approved','rejected') COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'pending',
+  `admin_note` varchar(255) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `processed_by` int UNSIGNED DEFAULT NULL,
+  `processed_at` datetime DEFAULT NULL,
+  `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_wr_user` (`user_id`),
+  KEY `idx_wr_status` (`status`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================================
+-- 22. TABEL SYSTEM LOGS & LIVE MONITORING (system_logs)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS `system_logs` (
+  `id` bigint UNSIGNED NOT NULL AUTO_INCREMENT,
+  `event_id` varchar(40) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `occurred_at` datetime(3) NOT NULL,
+  `created_at` datetime(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  `category` varchar(50) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `event_name` varchar(120) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `severity` varchar(20) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `outcome` varchar(20) COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'info',
+  `source` varchar(30) COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'backend',
+  `service` varchar(60) COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'api',
+  `http_method` varchar(16) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `route_template` varchar(255) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `status_code` int DEFAULT NULL,
+  `duration_ms` int DEFAULT NULL,
+  `request_id` varchar(64) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `trace_id` varchar(64) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `user_id` int DEFAULT NULL,
+  `role` varchar(30) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `order_id` int DEFAULT NULL,
+  `transaction_id` int DEFAULT NULL,
+  `reference_code` varchar(100) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `message` text COLLATE utf8mb4_unicode_ci NOT NULL,
+  `error_code` varchar(80) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `error_name` varchar(120) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `error_message` text COLLATE utf8mb4_unicode_ci,
+  `error_stack` text COLLATE utf8mb4_unicode_ci,
+  `metadata_json` json DEFAULT NULL,
+  `ip_masked` varchar(64) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `user_agent` varchar(500) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `platform` varchar(50) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `app_version` varchar(50) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `acknowledged_at` datetime DEFAULT NULL,
+  `acknowledged_by` int DEFAULT NULL,
+  `deleted_at` datetime DEFAULT NULL,
+  `deleted_by` int DEFAULT NULL,
+  `delete_reason` varchar(255) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `retention_expires_at` datetime DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_system_logs_event_id` (`event_id`),
+  KEY `idx_system_logs_occurred_at` (`occurred_at`, `id`),
+  KEY `idx_system_logs_category_occurred` (`category`, `occurred_at`),
+  KEY `idx_system_logs_severity_occurred` (`severity`, `occurred_at`),
+  KEY `idx_system_logs_request_id` (`request_id`),
+  KEY `idx_system_logs_user_occurred` (`user_id`, `occurred_at`),
+  KEY `idx_system_logs_order_id` (`order_id`),
+  KEY `idx_system_logs_transaction_id` (`transaction_id`),
+  KEY `idx_system_logs_status_occurred` (`status_code`, `occurred_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Nyalakan kembali pengecekan Foreign Key
 SET FOREIGN_KEY_CHECKS = 1;

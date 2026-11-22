@@ -9,12 +9,18 @@ import { testConnection } from './config/database.js';
 import AiSetting from './models/AiSetting.js';
 import { startPaymentPoller } from './services/paymentPoller.js';
 import { ensureSystemLogsSchema, logSystemEvent } from './services/loggingService.js';
+import { ensureDatabaseStructure } from './scripts/migrate.js';
+import { DEFAULT_DINOYOCRAFT_SYSTEM_PROMPT } from './services/aiProviderService.js';
 
 const PORT = process.env.PORT || 5000;
 
 const startServer = async (): Promise<void> => {
   // Tes koneksi database sebelum server mulai menerima request
   await testConnection();
+
+  // Sinkronisasi struktur tabel & kolom tambahan secara non-destructive
+  await ensureDatabaseStructure({ verbose: false });
+  console.log('✅ Database tables & incremental columns verified (non-destructive).');
 
   // Pastikan tabel system_logs dan index siap (§9.2, §14.1)
   await ensureSystemLogsSchema();
@@ -25,11 +31,11 @@ const startServer = async (): Promise<void> => {
   await AiSetting.findOrCreate({
     where: { id: 1 },
     defaults: {
-      is_auto_reply_active: false,
-      model_name: 'gemini-1.5-pro',
+      is_auto_reply_active: true,
+      provider: null,
+      model_name: 'gemini-3.5-flash-lite',
       api_key: '',
-      system_prompt:
-        'Anda adalah Asisten Virtual resmi dari Kampung Keramik Dinoyo. Tugas Anda adalah melayani pelanggan, memberikan info seputar harga dan jadwal bengkel, serta membantu proses pemesanan dengan ramah dan sopan.',
+      system_prompt: DEFAULT_DINOYOCRAFT_SYSTEM_PROMPT,
     },
   });
   console.log('✅ AI Settings table synced and ready.');
@@ -70,7 +76,7 @@ process.on('unhandledRejection', (reason: unknown) => {
       message: reason instanceof Error ? reason.message : String(reason),
       stack: reason instanceof Error ? reason.stack : null,
     },
-  }).catch(() => {});
+  }).catch(() => { });
 });
 
 // Handle uncaught exceptions
@@ -90,7 +96,7 @@ process.on('uncaughtException', (err: Error) => {
       message: err.message,
       stack: err.stack || null,
     },
-  }).catch(() => {});
+  }).catch(() => { });
 });
 
 process.on('exit', (code: number) => {
