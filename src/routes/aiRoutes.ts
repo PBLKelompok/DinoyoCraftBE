@@ -5,13 +5,20 @@
 
 import { Router } from 'express';
 import * as aiController from '../controllers/aiController.js';
-import { verifyToken, requireRole } from '../middlewares/authMiddleware.js';
+import { verifyToken, optionalVerifyToken, requireRole } from '../middlewares/authMiddleware.js';
 import { validateZod } from '../middlewares/validatorMiddleware.js';
-import { aiAnalysisSchema } from '../validators/schemas.js';
+import { aiAnalysisSchema, aiChatSchema } from '../validators/schemas.js';
 
 const router = Router();
 
-// Semua route AI memerlukan autentikasi
+/**
+ * @route   POST /api/ai/chat
+ * @desc    ClayBot — Asisten Virtual Katalog & Bantuan Pelanggan DinoyoCraft
+ * @access  Public / Optional Auth (pengunjung, mitra, admin)
+ */
+router.post('/chat', optionalVerifyToken, validateZod(aiChatSchema), aiController.chatWithClayBot);
+
+// Semua route analisis bisnis di bawah memerlukan autentikasi
 router.use(verifyToken);
 
 /**
