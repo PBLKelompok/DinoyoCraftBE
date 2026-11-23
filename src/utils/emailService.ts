@@ -29,21 +29,66 @@ export const getTransporter = () => {
   });
 };
 
+export type OtpEmailPurpose =
+  | 'register'
+  | 'reset_password'
+  | 'login'
+  | '2fa_enable'
+  | '2fa_disable';
+
+const PURPOSE_COPY: Record<
+  OtpEmailPurpose,
+  { subject: string; heading: string; description: string }
+> = {
+  register: {
+    subject: 'Kode OTP Verifikasi Pendaftaran - DinoyoCraft',
+    heading: 'Kode Verifikasi Akun',
+    description:
+      'Berikut adalah kode One-Time Password (OTP) Anda untuk menyelesaikan pendaftaran akun DinoyoCraft:',
+  },
+  reset_password: {
+    subject: 'Kode OTP Reset Kata Sandi - DinoyoCraft',
+    heading: 'Atur Ulang Kata Sandi',
+    description:
+      'Berikut adalah kode One-Time Password (OTP) Anda untuk mengatur ulang kata sandi akun DinoyoCraft:',
+  },
+  login: {
+    subject: 'Kode OTP Masuk Akun (2FA) - DinoyoCraft',
+    heading: 'Verifikasi Masuk Akun (2FA)',
+    description:
+      'Kami mendeteksi percobaan masuk ke akun Anda yang dilindungi Autentikasi 2 Langkah. Masukkan kode OTP berikut di aplikasi DinoyoCraft:',
+  },
+  '2fa_enable': {
+    subject: 'Kode OTP Aktivasi 2FA - DinoyoCraft',
+    heading: 'Aktivasi Autentikasi 2 Langkah',
+    description:
+      'Berikut adalah kode OTP untuk mengaktifkan fitur Autentikasi 2 Langkah (2FA) pada akun DinoyoCraft Anda:',
+  },
+  '2fa_disable': {
+    subject: 'Kode OTP Penonaktifan 2FA - DinoyoCraft',
+    heading: 'Penonaktifan Autentikasi 2 Langkah',
+    description:
+      'Berikut adalah kode OTP untuk mengonfirmasi penonaktifan Autentikasi 2 Langkah (2FA) pada akun DinoyoCraft Anda:',
+  },
+};
+
 /**
- * Kirim kode OTP ke email user dengan template branded DinoyoCraft
+ * Kirim kode OTP ke email asli user dengan template branded DinoyoCraft
  */
 export const sendOTPEmail = async (
   toEmail: string,
   otpCode: string,
-  recipientName: string = 'Pengguna'
+  recipientName: string = 'Pengguna',
+  purpose: OtpEmailPurpose = 'register'
 ): Promise<void> => {
   const logoUrl =
     'https://raw.githubusercontent.com/alifarda126/DinoyoCraftApp/main/assets/images/branding/Logo.png';
+  const copy = PURPOSE_COPY[purpose] || PURPOSE_COPY.register;
 
   const mailOptions = {
     from: `"DinoyoCraft Portal" <${process.env['EMAIL_USER'] || 'csdinoyocraft@gmail.com'}>`,
     to: toEmail,
-    subject: 'Kode OTP Verifikasi - DinoyoCraft',
+    subject: copy.subject,
     html: `
       <!DOCTYPE html>
       <html lang="id">
@@ -84,13 +129,13 @@ export const sendOTPEmail = async (
                       <tr>
                         <td style="color: #4A4641; font-size: 15px; line-height: 1.65;">
                           <p style="margin: 0 0 14px; font-size: 17px; font-weight: 700; color: #2D2A26;">
-                            Kode Verifikasi Akun
+                            ${copy.heading}
                           </p>
                           <p style="margin: 0 0 10px;">
                             Halo <strong style="color: #2D2A26;">${recipientName}</strong>,
                           </p>
                           <p style="margin: 0 0 20px; color: #66615B; font-size: 14.5px;">
-                            Berikut adalah kode One-Time Password (OTP) Anda untuk verifikasi keamanan akun DinoyoCraft:
+                            ${copy.description}
                           </p>
                         </td>
                       </tr>

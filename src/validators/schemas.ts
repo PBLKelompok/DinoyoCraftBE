@@ -65,11 +65,14 @@ export const updateOrderStatusSchema = z.object({
 // ============================================================
 export const createReviewSchema = z.object({
   product_id: z.coerce.number().int().positive('ID produk harus valid'),
-  order_item_id: z.coerce.number().int().positive().optional().nullable(),
+  order_item_id: z.preprocess(
+    (val) => (val === '' || val === null || val === undefined || val === 'null' ? null : val),
+    z.coerce.number().int().positive().nullable().optional()
+  ),
   rating: z.coerce.number().int().min(1, 'Rating minimal 1').max(5, 'Rating maksimal 5'),
   variant: z.string().max(100).optional().nullable(),
   comment: z.string().max(1000, 'Komentar maksimal 1000 karakter').optional().nullable(),
-  photo_urls: z.array(z.string()).optional().nullable(),
+  photo_urls: z.union([z.array(z.string()), z.string()]).optional().nullable(),
 });
 
 export const replyReviewSchema = z.object({
@@ -96,6 +99,7 @@ export const registerMitraSchema = z.object({
 export const loginSchema = z.object({
   email: z.string().email('Format email tidak valid'),
   password: z.string().min(1, 'Password wajib diisi'),
+  portal: z.enum(['web', 'mobile']).optional(),
 });
 
 export const googleLoginSchema = z
@@ -103,15 +107,27 @@ export const googleLoginSchema = z
     credential: z.string().optional(),
     id_token: z.string().optional(),
     token: z.string().optional(),
+    access_token: z.string().optional(),
     role: z.enum(['pengunjung', 'mitra', 'admin']).optional(),
+    portal: z.enum(['web', 'mobile']).optional(),
     userInfo: z.record(z.string(), z.any()).optional(),
     is_register: z.boolean().optional(),
     action: z.string().optional(),
     phone: z.string().optional(),
   })
-  .refine((data) => data.credential || data.id_token || data.token || data.userInfo, {
-    message: 'Data otentikasi Google wajib dikirim',
-  });
+  .refine(
+    (data) =>
+      Boolean(
+        data.credential ||
+        data.id_token ||
+        data.token ||
+        data.access_token ||
+        data.userInfo
+      ),
+    {
+      message: 'Data otentikasi Google wajib dikirim',
+    }
+  );
 
 
 export const forgotPasswordSchema = z.object({
@@ -130,8 +146,10 @@ export const resetPasswordSchema = z.object({
 });
 
 export const updateProfileSchema = z.object({
+  name: z.string().optional(),
   ownerName: z.string().optional(),
   nama: z.string().optional(),
+  username: z.string().min(3, 'Username minimal 3 karakter').max(30, 'Username maksimal 30 karakter').regex(/^[a-zA-Z0-9_]+$/, 'Username hanya boleh huruf, angka, dan garis bawah').optional(),
   storeName: z.string().optional(),
   nama_toko: z.string().optional(),
   phone: z.string().optional(),
@@ -151,30 +169,50 @@ export const updateProfileSchema = z.object({
   instagram: z.string().optional().nullable(),
 });
 
+export const changePasswordSchema = z.object({
+  currentPassword: z.string().optional().nullable(),
+  newPassword: z.string().min(8, 'Kata sandi baru minimal 8 karakter'),
+});
+
+export const requestTwoFactorOtpSchema = z.object({
+  action: z.enum(['enable', 'disable']),
+});
+
+export const verifyTwoFactorOtpSchema = z.object({
+  action: z.enum(['enable', 'disable']),
+  otp: z.string().min(4, 'Kode OTP minimal 4 digit').max(10, 'Kode OTP maksimal 10 digit'),
+});
+
 // ============================================================
 // 6. Skema Katalog Produk (Products)
 // ============================================================
 const parseCategoryInput = (val: unknown) => {
-  if (typeof val === 'number') return val;
-  if (typeof val === 'string') {
-    const parsed = parseInt(val, 10);
-    if (!isNaN(parsed) && parsed > 0) return parsed;
-    const lower = val.toLowerCase().trim();
-    if (lower.includes('dekorasi')) return 1;
-    if (lower.includes('makan') || lower.includes('piring') || lower.includes('cangkir') || lower.includes('mangkok')) return 2;
-    if (lower.includes('souvenir')) return 3;
-    if (lower.includes('pot')) return 4;
-    return 1;
+  if (typeof val === 'number' && Number.isFinite(val) && val > 0) {
+    return Math.trunc(val);
   }
-  return 1;
+  if (typeof val === 'string') {
+    const trimmed = val.trim();
+    if (!trimmed) return '';
+    if (/^\d+$/.test(trimmed)) {
+      const parsed = parseInt(trimmed, 10);
+      if (parsed > 0) return parsed;
+    }
+    return trimmed;
+  }
+  return '';
 };
+
+const categoryFieldSchema = z.union([
+  z.number().int().positive('Kategori produk wajib diisi'),
+  z.string().trim().min(1, 'Kategori produk wajib diisi').max(100),
+]);
 
 export const createProductSchema = z.object({
   name: z.string().min(2, 'Nama produk minimal 2 karakter').max(200),
   description: z.string().optional().nullable(),
   price: z.coerce.number().min(0, 'Harga produk tidak boleh negatif'),
   stock: z.coerce.number().int().min(0, 'Stok produk tidak boleh negatif'),
-  category_id: z.preprocess(parseCategoryInput, z.number().int().positive('Kategori produk wajib diisi')),
+  category_id: z.preprocess(parseCategoryInput, categoryFieldSchema),
   weight_gram: z.coerce.number().int().min(1).default(500).optional(),
   variants: z.union([z.string(), z.array(z.any())]).optional().nullable(),
   image_url: z.string().url('Format URL foto tidak valid').optional().or(z.literal('')).nullable(),
@@ -186,7 +224,10 @@ export const updateProductSchema = z.object({
   description: z.string().optional().nullable(),
   price: z.coerce.number().min(0).optional(),
   stock: z.coerce.number().int().min(0).optional(),
-  category_id: z.preprocess((val) => (val === undefined || val === null || val === '') ? undefined : parseCategoryInput(val), z.number().int().positive().optional()),
+  category_id: z.preprocess(
+    (val) => (val === undefined || val === null || val === '' ? undefined : parseCategoryInput(val)),
+    categoryFieldSchema.optional()
+  ),
   weight_gram: z.coerce.number().int().min(1).optional(),
   variants: z.union([z.string(), z.array(z.any())]).optional().nullable(),
 });
@@ -197,6 +238,10 @@ export const updateProductSchema = z.object({
 export const sendMessageSchema = z.object({
   message: z.string().max(2000, 'Pesan maksimal 2000 karakter').optional().nullable(),
   image_url: z.string().optional().nullable(),
+  metadata: z.union([z.record(z.string(), z.any()), z.string()]).optional().nullable(),
+  targetUserId: z.union([z.string(), z.number()]).optional().nullable(),
+  target_user_id: z.union([z.string(), z.number()]).optional().nullable(),
+  receiver_id: z.union([z.string(), z.number()]).optional().nullable(),
 });
 
 // ============================================================
@@ -227,6 +272,24 @@ export const aiAnalysisSchema = z.object({
   productCategory: z.string().max(100).optional().nullable(),
   targetMarket: z.string().max(100).optional().nullable(),
   additionalNotes: z.string().max(500).optional().nullable(),
+});
+
+export const aiChatSchema = z.object({
+  message: z.string().min(1, 'Pesan tidak boleh kosong').max(3000, 'Pesan maksimal 3000 karakter'),
+  history: z
+    .array(
+      z.object({
+        role: z.enum(['user', 'assistant', 'model']),
+        content: z.string().max(3000),
+      })
+    )
+    .max(12)
+    .optional(),
+  locale: z.enum(['id', 'en']).optional(),
+  role_context: z.enum(['customer', 'mitra', 'store_bot']).optional(),
+  store_name: z.string().max(150).optional().nullable(),
+  store_user_id: z.union([z.string(), z.number()]).optional().nullable(),
+  product_name: z.string().max(200).optional().nullable(),
 });
 
 // ============================================================

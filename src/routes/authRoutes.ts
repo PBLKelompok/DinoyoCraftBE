@@ -11,6 +11,12 @@ import {
   registerMitra,
   login,
   loginMitra,
+  verifyLoginOtp,
+  resendLoginOtp,
+  requestTwoFactorOtp,
+  verifyTwoFactorOtp,
+  changePassword,
+  logoutOtherDevices,
   googleLogin,
   getProfile,
   updateProfile,
@@ -24,6 +30,11 @@ import {
 } from '../controllers/authController.js';
 import { uploadMitraDocs, uploadProfileImages } from '../middlewares/uploadMiddleware.js';
 import { verifyToken } from '../middlewares/authMiddleware.js';
+import {
+  loginRateLimiter,
+  otpSendRateLimiter,
+  otpVerifyRateLimiter,
+} from '../middlewares/rateLimitMiddleware.js';
 import { validateZod } from '../middlewares/validatorMiddleware.js';
 import {
   registerMitraSchema,
@@ -33,6 +44,9 @@ import {
   verifyOtpSchema,
   resetPasswordSchema,
   updateProfileSchema,
+  changePasswordSchema,
+  requestTwoFactorOtpSchema,
+  verifyTwoFactorOtpSchema,
 } from '../validators/schemas.js';
 
 const router = Router();
@@ -40,12 +54,14 @@ const router = Router();
 // Registrasi & Login
 router.get('/check-username', checkUsername);
 router.post('/check-username', checkUsername);
-router.post('/register-customer', registerCustomer);
-router.post('/verify-register-otp', verifyRegisterOtp);
-router.post('/resend-register-otp', resendRegisterOtp);
+router.post('/register-customer', otpSendRateLimiter, registerCustomer);
+router.post('/verify-register-otp', otpVerifyRateLimiter, verifyRegisterOtp);
+router.post('/resend-register-otp', otpSendRateLimiter, resendRegisterOtp);
 router.post('/register-mitra', uploadMitraDocs, validateZod(registerMitraSchema), registerMitra);
-router.post('/login', validateZod(loginSchema), login);
-router.post('/login-mitra', validateZod(loginSchema), loginMitra);
+router.post('/login', loginRateLimiter, validateZod(loginSchema), login);
+router.post('/login-mitra', loginRateLimiter, validateZod(loginSchema), loginMitra);
+router.post('/verify-login-otp', otpVerifyRateLimiter, validateZod(verifyOtpSchema), verifyLoginOtp);
+router.post('/resend-login-otp', otpSendRateLimiter, resendLoginOtp);
 router.post('/google-login', validateZod(googleLoginSchema), googleLogin);
 router.post('/google-register', validateZod(googleLoginSchema), (req, _res, next) => {
   req.body.is_register = true;
@@ -53,9 +69,15 @@ router.post('/google-register', validateZod(googleLoginSchema), (req, _res, next
 }, googleLogin);
 
 // Lupa Kata Sandi & OTP
-router.post('/forgot-password', validateZod(forgotPasswordSchema), forgotPassword);
-router.post('/verify-otp', validateZod(verifyOtpSchema), verifyOtp);
-router.post('/reset-password', validateZod(resetPasswordSchema), resetPassword);
+router.post('/forgot-password', otpSendRateLimiter, validateZod(forgotPasswordSchema), forgotPassword);
+router.post('/verify-otp', otpVerifyRateLimiter, validateZod(verifyOtpSchema), verifyOtp);
+router.post('/reset-password', otpVerifyRateLimiter, validateZod(resetPasswordSchema), resetPassword);
+
+// Autentikasi 2 Langkah (2FA), Ubah Kata Sandi, & Sesi Perangkat
+router.post('/2fa/request-otp', verifyToken, otpSendRateLimiter, validateZod(requestTwoFactorOtpSchema), requestTwoFactorOtp);
+router.post('/2fa/verify-otp', verifyToken, otpVerifyRateLimiter, validateZod(verifyTwoFactorOtpSchema), verifyTwoFactorOtp);
+router.put('/change-password', verifyToken, validateZod(changePasswordSchema), changePassword);
+router.post('/logout-other-devices', verifyToken, logoutOtherDevices);
 
 // Refresh Token (perpanjangan sesi mobile)
 router.post('/refresh', refreshToken);

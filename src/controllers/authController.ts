@@ -38,11 +38,58 @@ const signTokenPair = (user: { id: number; email: string; role: string; ver?: nu
   return { token, refresh_token };
 };
 
+const applyMitraPendingAuthLog = (
+  res: Response,
+  opts: {
+    userId: number;
+    email: string;
+    storeName?: string | null;
+    ownerName?: string | null;
+    isVerified?: number | null;
+    rejectionReason?: string | null;
+    isRegistration?: boolean;
+    authMethod?: 'password' | 'google' | 'otp_2fa';
+  }
+): void => {
+  const verifiedNum = Number(opts.isVerified ?? 0);
+  const isRejected = verifiedNum === 2 || Boolean(opts.rejectionReason);
+  const storeLabel = opts.storeName || opts.ownerName || 'Toko Mitra';
+  res.locals['userId'] = opts.userId;
+  res.locals['role'] = 'mitra';
+  res.locals['logCategory'] = 'auth';
+  res.locals['logSeverity'] = 'info';
+  res.locals['logOutcome'] = 'pending';
+  if (opts.isRegistration) {
+    res.locals['logEventName'] = 'auth.mitra.register_pending';
+    res.locals['logMessage'] = `Pendaftaran Mitra baru "${storeLabel}" (${opts.email}) berhasil dikirim — menunggu persetujuan verifikasi Admin (PENDING)`;
+  } else {
+    res.locals['logEventName'] = 'auth.mitra.login_pending_verification';
+    const statusNote = isRejected
+      ? 'pengajuan sebelumnya ditolak, menunggu perbaikan dokumen & verifikasi ulang Admin'
+      : 'pendaftaran toko belum disetujui, menunggu verifikasi Admin';
+    res.locals['logMessage'] = `Login Mitra "${storeLabel}" (${opts.email}) berhasil (akses terbatas Profil Toko) — ${statusNote} (PENDING)`;
+  }
+  res.locals['logMetadata'] = {
+    email: opts.email,
+    role: 'mitra',
+    storeName: opts.storeName || null,
+    authMethod: opts.authMethod || 'password',
+    isVerified: verifiedNum,
+    verificationStatus: isRejected ? 'rejected_awaiting_resubmission' : 'pending_approval',
+    rejectionReason: opts.rejectionReason || null,
+    accessScope: opts.isRegistration ? 'awaiting_login' : 'profile_only',
+  };
+};
+
 
 export const registerCustomer = async (req: Request, res: Response): Promise<void> => {
   try {
-    const { name, email, password, phone, username, google_id, avatar_url, isGoogleAuth } = req.body;
+    const { name, email, password, phone, username, birth_date, birthDate, google_id, avatar_url, isGoogleAuth } = req.body;
     const isGoogle = Boolean(isGoogleAuth || google_id);
+    const normalizedBirthDate = (birth_date ?? birthDate)
+      ? String(birth_date ?? birthDate).slice(0, 10)
+      : null;
+    const normalizedPhone = phone && String(phone).trim() ? String(phone).trim() : null;
 
     if (!name || !email) {
       res.status(400).json({
@@ -72,7 +119,7 @@ export const registerCustomer = async (req: Request, res: Response): Promise<voi
 
     // 1. Cek apakah email sudah terdaftar di database
     const [existingUsers]: any = await db.query(
-      'SELECT id, name, email, role, google_id, avatar_url, token_version FROM users WHERE email = ?',
+      'SELECT id, name, username, phone, birth_date, gender, email, role, google_id, avatar_url, token_version, two_factor_enabled FROM users WHERE email = ?',
       [cleanEmail]
     );
 
@@ -81,8 +128,8 @@ export const registerCustomer = async (req: Request, res: Response): Promise<voi
       if (isGoogle && !existing.google_id) {
         // Tautkan akun Google ke pengguna yang sudah terdaftar
         await db.query(
-          'UPDATE users SET google_id = ?, avatar_url = COALESCE(avatar_url, ?) WHERE id = ?',
-          [google_id || null, avatar_url || null, existing.id]
+          'UPDATE users SET google_id = ?, avatar_url = COALESCE(avatar_url, ?), phone = COALESCE(phone, ?), birth_date = COALESCE(birth_date, ?) WHERE id = ?',
+          [google_id || null, avatar_url || null, normalizedPhone, normalizedBirthDate, existing.id]
         );
         const { token, refresh_token } = signTokenPair({ id: existing.id, email: cleanEmail, role: existing.role, ver: existing.token_version });
         res.status(200).json({
@@ -93,8 +140,12 @@ export const registerCustomer = async (req: Request, res: Response): Promise<voi
             refresh_token,
             id: existing.id,
             name: existing.name,
+            username: existing.username || cleanEmail.split('@')[0],
+            phone: existing.phone || normalizedPhone,
+            birth_date: existing.birth_date || normalizedBirthDate,
             email: cleanEmail,
             role: existing.role,
+            two_factor_enabled: Boolean(existing.two_factor_enabled),
           },
           meta: { timestamp: new Date().toISOString() }
         });
@@ -113,17 +164,20 @@ export const registerCustomer = async (req: Request, res: Response): Promise<voi
     if (isGoogle) {
       const passwordHash = password ? await bcrypt.hash(password, 10) : null;
       const [result]: any = await db.query(
-        'INSERT INTO users (name, username, email, password_hash, role, is_active, google_id, avatar_url) VALUES (?, ?, ?, ?, "pengunjung", 1, ?, ?)',
-        [name.trim(), cleanUsername, cleanEmail, passwordHash, google_id || null, avatar_url || null]
+        'INSERT INTO users (name, username, phone, birth_date, email, password_hash, password_changed_at, role, is_active, google_id, avatar_url) VALUES (?, ?, ?, ?, ?, ?, ?, "pengunjung", 1, ?, ?)',
+        [
+          name.trim(),
+          cleanUsername,
+          normalizedPhone,
+          normalizedBirthDate,
+          cleanEmail,
+          passwordHash,
+          passwordHash ? new Date() : null,
+          google_id || null,
+          avatar_url || null,
+        ]
       );
       const newUserId = result.insertId;
-
-      if (phone && phone.trim()) {
-        await db.query(
-          'INSERT INTO user_addresses (user_id, recipient_name, phone, full_address, is_default) VALUES (?, ?, ?, ?, 1) ON DUPLICATE KEY UPDATE phone = VALUES(phone)',
-          [newUserId, name.trim(), phone.trim(), 'Belum ada alamat lengkap']
-        ).catch(() => {});
-      }
 
       const { token, refresh_token } = signTokenPair({ id: newUserId, email: cleanEmail, role: 'pengunjung' });
 
@@ -135,9 +189,13 @@ export const registerCustomer = async (req: Request, res: Response): Promise<voi
           refresh_token,
           id: newUserId,
           name: name.trim(),
+          username: cleanUsername || cleanEmail.split('@')[0],
+          phone: normalizedPhone,
+          birth_date: normalizedBirthDate,
           email: cleanEmail,
           role: 'pengunjung',
           avatar_url: avatar_url || null,
+          two_factor_enabled: false,
         },
         meta: { timestamp: new Date().toISOString() }
       });
@@ -168,7 +226,8 @@ export const registerCustomer = async (req: Request, res: Response): Promise<voi
         username: cleanUsername,
         email: cleanEmail,
         password,
-        phone: phone ? phone.trim() : null,
+        phone: normalizedPhone,
+        birth_date: normalizedBirthDate,
       },
     });
 
@@ -177,7 +236,7 @@ export const registerCustomer = async (req: Request, res: Response): Promise<voi
     console.log('========================================\n');
 
     try {
-      await sendOTPEmail(cleanEmail, otp, name.trim());
+      await sendOTPEmail(cleanEmail, otp, name.trim(), 'register');
       console.log(`✅ [OTP EMAIL] Email OTP pendaftaran berhasil terkirim ke ${cleanEmail}`);
     } catch (err: any) {
       console.error('⚠️ [OTP EMAIL] Gagal mengirim email OTP pendaftaran:', err.message);
@@ -269,11 +328,24 @@ export const registerMitra = async (req: Request, res: Response): Promise<void> 
       return;
     }
 
-    const [existingUsers]: any = await connection.query('SELECT id, role FROM users WHERE email = ?', [email]);
+    const cleanRegisterEmail = String(email).trim().toLowerCase();
+    const [existingUsers]: any = await connection.query(
+      'SELECT id, role, password_hash FROM users WHERE LOWER(TRIM(email)) = ? LIMIT 1',
+      [cleanRegisterEmail]
+    );
     let newUserId: number;
 
     if (existingUsers.length > 0) {
       const existingUser = existingUsers[0];
+      if (existingUser.role === 'admin') {
+        await connection.rollback();
+        res.status(403).json({
+          success: false,
+          message: 'Email administrator tidak dapat didaftarkan sebagai Mitra.',
+        });
+        return;
+      }
+
       const [existingProfile]: any = await connection.query(
         'SELECT id, ktp_file_url FROM mitra_profiles WHERE user_id = ?',
         [existingUser.id]
@@ -284,18 +356,45 @@ export const registerMitra = async (req: Request, res: Response): Promise<void> 
         return;
       }
 
-      newUserId = existingUser.id;
-      if (password) {
-        const passwordHash = await bcrypt.hash(password, 10);
-        await connection.query('UPDATE users SET name = ?, password_hash = ? WHERE id = ?', [name, passwordHash, newUserId]);
+      if (existingUser.password_hash) {
+        const passMatches =
+          typeof password === 'string' &&
+          password.length > 0 &&
+          (await bcrypt.compare(password, existingUser.password_hash));
+        if (!passMatches) {
+          await connection.rollback();
+          res.status(409).json({
+            success: false,
+            message:
+              'Email ini sudah terdaftar sebagai akun pelanggan. Masukkan kata sandi akun Anda yang sesuai untuk mendaftarkan toko Mitra.',
+          });
+          return;
+        }
+        newUserId = existingUser.id;
+        await connection.query(
+          "UPDATE users SET name = ?, role = 'mitra' WHERE id = ?",
+          [name.trim(), newUserId]
+        );
       } else {
-        await connection.query('UPDATE users SET name = ? WHERE id = ?', [name, newUserId]);
+        newUserId = existingUser.id;
+        if (password) {
+          const passwordHash = await bcrypt.hash(password, 10);
+          await connection.query(
+            "UPDATE users SET name = ?, password_hash = ?, role = 'mitra' WHERE id = ?",
+            [name.trim(), passwordHash, newUserId]
+          );
+        } else {
+          await connection.query(
+            "UPDATE users SET name = ?, role = 'mitra' WHERE id = ?",
+            [name.trim(), newUserId]
+          );
+        }
       }
     } else {
       const passwordHash = password ? await bcrypt.hash(password, 10) : null;
       const [userResult]: any = await connection.query(
         'INSERT INTO users (name, email, password_hash, role, is_active) VALUES (?, ?, ?, ?, ?)',
-        [name, email, passwordHash, 'mitra', 1]
+        [name.trim(), cleanRegisterEmail, passwordHash, 'mitra', 1]
       );
       newUserId = userResult.insertId;
     }
@@ -342,6 +441,16 @@ export const registerMitra = async (req: Request, res: Response): Promise<void> 
 
     await connection.commit();
 
+    applyMitraPendingAuthLog(res, {
+      userId: newUserId,
+      email: String(email).trim().toLowerCase(),
+      storeName: store_name,
+      ownerName: name,
+      isVerified: 0,
+      isRegistration: true,
+      authMethod: 'password',
+    });
+
     res.status(201).json({
       success: true,
       message: 'Registrasi Mitra berhasil! Menunggu verifikasi admin.',
@@ -368,7 +477,7 @@ export const registerMitra = async (req: Request, res: Response): Promise<void> 
 // Login umum yang mendukung peran pengunjung, mitra, dan admin
 export const login = async (req: Request, res: Response): Promise<void> => {
   try {
-    const { email, password } = req.body;
+    const { email, password, portal } = req.body;
 
     if (!email || !password) {
       res.status(400).json({
@@ -380,7 +489,9 @@ export const login = async (req: Request, res: Response): Promise<void> => {
     }
 
     const query = `
-      SELECT u.id, u.name, u.email, u.password_hash, u.role, u.is_active, u.avatar_url, u.token_version,
+      SELECT u.id, u.name, COALESCE(NULLIF(TRIM(u.username), ''), SUBSTRING_INDEX(u.email, '@', 1)) AS username,
+             u.phone, u.birth_date, u.gender, u.email, u.password_hash, u.password_changed_at,
+             u.role, u.is_active, u.avatar_url, u.token_version, u.two_factor_enabled,
              m.store_name, m.is_verified, m.rejection_reason
       FROM users u 
       LEFT JOIN mitra_profiles m ON u.id = m.user_id 
@@ -409,6 +520,23 @@ export const login = async (req: Request, res: Response): Promise<void> => {
       return;
     }
 
+    if (portal === 'web' && user.role === 'pengunjung') {
+      res.status(403).json({
+        success: false,
+        code: 'PENGUNJUNG_ROLE_NOT_ALLOWED_WEB',
+        redirect_to_register: true,
+        message:
+          'Email ini sudah terdaftar sebagai Pengunjung di aplikasi DinoyoCraft dan tidak dapat digunakan untuk masuk di web. Silakan daftar sebagai Mitra terlebih dahulu jika ingin menggunakan akun yang sama.',
+        data: {
+          email: user.email,
+          name: user.name,
+          role: user.role,
+        },
+        meta: { timestamp: new Date().toISOString() }
+      });
+      return;
+    }
+
     if (!user.password_hash) {
       res.status(400).json({
         success: false,
@@ -428,7 +556,76 @@ export const login = async (req: Request, res: Response): Promise<void> => {
       return;
     }
 
+    res.locals['userId'] = user.id;
+    res.locals['role'] = user.role;
+
+    // Jika Autentikasi 2 Langkah (2FA) aktif di akun pengguna:
+    // JANGAN keluarkan JWT terlebih dahulu — kirim OTP 6 digit ke email asli pengguna!
+    if (Number(user.two_factor_enabled) === 1) {
+      const loginOtp = Math.floor(100000 + Math.random() * 900000).toString();
+      await db.query(
+        "UPDATE user_otps SET is_used = 1 WHERE user_id = ? AND otp_type = 'login' AND is_used = 0",
+        [user.id]
+      );
+      await db.query(
+        "INSERT INTO user_otps (user_id, otp_code, otp_type, expires_at, is_used) VALUES (?, ?, 'login', DATE_ADD(NOW(), INTERVAL 5 MINUTE), 0)",
+        [user.id, loginOtp]
+      );
+
+      console.log('\n========================================');
+      console.log(`[DEV LOGIN 2FA OTP] Kode OTP untuk ${user.email}: ${loginOtp}`);
+      console.log('========================================\n');
+
+      try {
+        await sendOTPEmail(user.email, loginOtp, user.name, 'login');
+      } catch (mailErr: any) {
+        console.error('⚠️ [LOGIN 2FA EMAIL] Gagal mengirim email OTP login:', mailErr.message);
+      }
+
+      res.locals['logCategory'] = 'auth';
+      res.locals['logEventName'] = 'auth.login.2fa_pending';
+      res.locals['logSeverity'] = 'info';
+      res.locals['logOutcome'] = 'pending';
+      res.locals['logMessage'] = `Login akun ${user.role} (${user.email}) menunggu verifikasi kode OTP 2FA (PENDING)`;
+
+      res.status(200).json({
+        success: true,
+        requires_2fa: true,
+        message: 'Kode OTP verifikasi masuk telah dikirim ke email terdaftar Anda.',
+        data: {
+          requires_2fa: true,
+          email: user.email,
+        },
+        meta: { timestamp: new Date().toISOString() },
+      });
+      return;
+    }
+
     const { token, refresh_token } = signTokenPair({ id: user.id, email: user.email, role: user.role, ver: user.token_version });
+
+    if (user.role === 'mitra' && Number(user.is_verified) !== 1) {
+      applyMitraPendingAuthLog(res, {
+        userId: user.id,
+        email: user.email,
+        storeName: user.store_name,
+        ownerName: user.name,
+        isVerified: user.is_verified,
+        rejectionReason: user.rejection_reason,
+        authMethod: 'password',
+      });
+    } else {
+      res.locals['logCategory'] = 'auth';
+      res.locals['logEventName'] = 'auth.login.succeeded';
+      res.locals['logSeverity'] = 'success';
+      res.locals['logOutcome'] = 'success';
+      res.locals['logMessage'] = `Login berhasil untuk akun ${user.role} (${user.email})`;
+      res.locals['logMetadata'] = {
+        email: user.email,
+        role: user.role,
+        storeName: user.store_name || null,
+        authMethod: 'password',
+      };
+    }
 
     res.cookie('token', token, {
       httpOnly: true,
@@ -445,9 +642,16 @@ export const login = async (req: Request, res: Response): Promise<void> => {
         refresh_token: refresh_token,
         id: user.id,
         name: user.name,
+        username: user.username,
+        phone: user.phone,
+        birth_date: user.birth_date,
+        gender: user.gender,
         email: user.email,
         role: user.role,
         avatar_url: user.avatar_url,
+        two_factor_enabled: false,
+        password_changed_at: user.password_changed_at,
+        has_password: true,
         store_name: user.store_name,
         is_verified: user.is_verified,
         rejection_reason: user.rejection_reason
@@ -501,6 +705,23 @@ export const loginMitra = async (req: Request, res: Response): Promise<void> => 
 
     const user = users[0];
 
+    if (user.role === 'pengunjung') {
+      res.status(403).json({
+        success: false,
+        code: 'PENGUNJUNG_ROLE_NOT_ALLOWED_WEB',
+        redirect_to_register: true,
+        message:
+          'Email ini sudah terdaftar sebagai Pengunjung di aplikasi DinoyoCraft dan tidak dapat digunakan untuk masuk di web. Silakan daftar sebagai Mitra terlebih dahulu jika ingin menggunakan akun yang sama.',
+        data: {
+          email: user.email,
+          name: user.name,
+          role: user.role,
+        },
+        meta: { timestamp: new Date().toISOString() }
+      });
+      return;
+    }
+
     if (user.role !== 'mitra' && user.role !== 'admin') {
       res.status(403).json({
         success: false,
@@ -539,6 +760,26 @@ export const loginMitra = async (req: Request, res: Response): Promise<void> => 
     }
 
     const { token, refresh_token } = signTokenPair({ id: user.id, email: user.email, role: user.role, ver: user.token_version });
+
+    res.locals['userId'] = user.id;
+    res.locals['role'] = user.role;
+    if (user.role === 'mitra' && Number(user.is_verified) !== 1) {
+      applyMitraPendingAuthLog(res, {
+        userId: user.id,
+        email: user.email,
+        storeName: user.store_name,
+        ownerName: user.name,
+        isVerified: user.is_verified,
+        rejectionReason: user.rejection_reason,
+        authMethod: 'password',
+      });
+    } else {
+      res.locals['logCategory'] = 'auth';
+      res.locals['logEventName'] = 'auth.login.succeeded';
+      res.locals['logSeverity'] = 'success';
+      res.locals['logOutcome'] = 'success';
+      res.locals['logMessage'] = `Login Mitra "${user.store_name || user.name}" (${user.email}) berhasil`;
+    }
 
     res.cookie('token', token, {
       httpOnly: true,
@@ -579,10 +820,22 @@ export const loginMitra = async (req: Request, res: Response): Promise<void> => 
 
 export const googleLogin = async (req: Request, res: Response): Promise<void> => {
   try {
-    const { credential, id_token, token: tokenParam, userInfo, is_register, action, role = 'pengunjung', phone } = req.body;
+    const {
+      credential,
+      id_token,
+      token: tokenParam,
+      access_token,
+      userInfo,
+      is_register,
+      action,
+      role = 'pengunjung',
+      portal,
+      phone,
+    } = req.body;
     const tokenToVerify = credential || id_token || tokenParam;
+    const oauthAccessToken = typeof access_token === 'string' ? access_token.trim() : '';
 
-    if (!tokenToVerify && !userInfo) {
+    if (!tokenToVerify && !oauthAccessToken && !userInfo) {
       res.status(400).json({ success: false, message: 'Data otentikasi Google wajib dikirim' });
       return;
     }
@@ -591,6 +844,7 @@ export const googleLogin = async (req: Request, res: Response): Promise<void> =>
     let name = '';
     let googleId = '';
     let avatarUrl: string | null = null;
+    let googleVerified = false;
 
     if (tokenToVerify) {
       try {
@@ -613,29 +867,56 @@ export const googleLogin = async (req: Request, res: Response): Promise<void> =>
           name = payload.name || payload.given_name || 'Pengguna Google';
           googleId = payload.sub;
           avatarUrl = payload.picture || null;
+          googleVerified = true;
         }
       } catch (verifyError) {
-        console.warn('Google verifyIdToken failed, attempting JWT decode fallback:', verifyError);
-        try {
-          const parts = tokenToVerify.split('.');
-          if (parts.length === 3) {
-            const decoded = JSON.parse(Buffer.from(parts[1], 'base64').toString('utf8'));
-            if (decoded && decoded.email) {
-              email = decoded.email;
-              name = decoded.name || decoded.given_name || 'Pengguna Google';
-              googleId = decoded.sub || '';
-              avatarUrl = decoded.picture || null;
-            }
-          }
-        } catch (decodeErr) {
-          console.error('Failed to decode Google token:', decodeErr);
-        }
+        console.warn('Google verifyIdToken failed:', verifyError);
+        res.status(401).json({
+          success: false,
+          message: 'Token Google tidak valid atau telah kedaluwarsa.',
+        });
+        return;
       }
-    } else if (userInfo && userInfo.email) {
-      email = userInfo.email;
-      name = userInfo.name || 'Pengguna Google';
-      googleId = userInfo.sub || userInfo.id || '';
-      avatarUrl = userInfo.picture || null;
+    } else if (oauthAccessToken) {
+      try {
+        const gRes = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+          headers: { Authorization: `Bearer ${oauthAccessToken}` },
+        });
+        if (!gRes.ok) {
+          res.status(401).json({
+            success: false,
+            message: 'Akses token Google tidak valid atau telah kedaluwarsa.',
+          });
+          return;
+        }
+        const gData = (await gRes.json()) as Record<string, any>;
+        if (gData && gData['email']) {
+          email = String(gData['email']);
+          name = String(gData['name'] || gData['given_name'] || 'Pengguna Google');
+          googleId = String(gData['sub'] || gData['id'] || '');
+          avatarUrl = gData['picture'] ? String(gData['picture']) : null;
+          googleVerified = true;
+        }
+      } catch (oauthErr) {
+        console.warn('Google userinfo verification failed:', oauthErr);
+        res.status(401).json({
+          success: false,
+          message: 'Gagal memverifikasi akses token Google.',
+        });
+        return;
+      }
+    } else if (process.env['NODE_ENV'] !== 'production' && userInfo && userInfo.email) {
+      email = String(userInfo.email);
+      name = String(userInfo.name || 'Pengguna Google');
+      googleId = String(userInfo.sub || userInfo.id || '');
+      avatarUrl = userInfo.picture ? String(userInfo.picture) : null;
+      googleVerified = false;
+    } else {
+      res.status(401).json({
+        success: false,
+        message: 'Token Google terverifikasi wajib disertakan.',
+      });
+      return;
     }
 
     if (!email) {
@@ -644,7 +925,10 @@ export const googleLogin = async (req: Request, res: Response): Promise<void> =>
     }
 
     const query = `
-      SELECT u.id, u.name, u.email, u.role, u.is_active, u.google_id, u.avatar_url, u.token_version,
+      SELECT u.id, u.name, COALESCE(NULLIF(TRIM(u.username), ''), SUBSTRING_INDEX(u.email, '@', 1)) AS username,
+             u.phone, u.birth_date, u.gender, u.email, u.role, u.is_active, u.google_id, u.avatar_url,
+             u.token_version, u.two_factor_enabled, u.password_changed_at,
+             (u.password_hash IS NOT NULL AND u.password_hash != '') AS has_password,
              m.store_name, m.is_verified, m.rejection_reason
       FROM users u 
       LEFT JOIN mitra_profiles m ON u.id = m.user_id 
@@ -663,8 +947,33 @@ export const googleLogin = async (req: Request, res: Response): Promise<void> =>
         return;
       }
 
+      if (portal === 'web' && user.role === 'pengunjung') {
+        res.status(403).json({
+          success: false,
+          code: 'PENGUNJUNG_ROLE_NOT_ALLOWED_WEB',
+          redirect_to_register: true,
+          message:
+            'Akun Google ini sudah terdaftar sebagai Pengunjung di aplikasi DinoyoCraft dan tidak dapat digunakan untuk masuk di web. Silakan daftar sebagai Mitra terlebih dahulu jika ingin menggunakan akun yang sama.',
+          data: {
+            email: user.email,
+            name: user.name,
+            role: user.role,
+          },
+          meta: { timestamp: new Date().toISOString() },
+        });
+        return;
+      }
+
       if (user.role !== 'mitra' && user.role !== 'admin' && user.role !== 'pengunjung') {
         res.status(403).json({ success: false, message: 'Akses ditolak. Peran pengguna tidak diizinkan.' });
+        return;
+      }
+
+      if (user.role === 'admin' && !googleVerified) {
+        res.status(401).json({
+          success: false,
+          message: 'Akun admin wajib masuk menggunakan token Google terverifikasi.',
+        });
         return;
       }
 
@@ -673,6 +982,43 @@ export const googleLogin = async (req: Request, res: Response): Promise<void> =>
           'UPDATE users SET google_id = COALESCE(google_id, ?), avatar_url = COALESCE(avatar_url, ?) WHERE id = ?',
           [googleId || null, avatarUrl || null, user.id]
         );
+      }
+
+      // Jika akun telah mengaktifkan 2FA, kirim OTP Login ke email aslinya
+      if (Number(user.two_factor_enabled) === 1) {
+        const loginOtp = Math.floor(100000 + Math.random() * 900000).toString();
+        await db.query(
+          "UPDATE user_otps SET is_used = 1 WHERE user_id = ? AND otp_type = 'login' AND is_used = 0",
+          [user.id]
+        );
+        await db.query(
+          "INSERT INTO user_otps (user_id, otp_code, otp_type, expires_at, is_used) VALUES (?, ?, 'login', DATE_ADD(NOW(), INTERVAL 5 MINUTE), 0)",
+          [user.id, loginOtp]
+        );
+        try {
+          await sendOTPEmail(user.email, loginOtp, user.name, 'login');
+        } catch (mailErr: any) {
+          console.error('⚠️ [GOOGLE LOGIN 2FA EMAIL] Gagal kirim OTP:', mailErr.message);
+        }
+        res.locals['userId'] = user.id;
+        res.locals['role'] = user.role;
+        res.locals['logCategory'] = 'auth';
+        res.locals['logEventName'] = 'auth.login.2fa_pending';
+        res.locals['logSeverity'] = 'info';
+        res.locals['logOutcome'] = 'pending';
+        res.locals['logMessage'] = `Login Google (${user.email}) menunggu verifikasi kode OTP 2FA (PENDING)`;
+        res.status(200).json({
+          success: true,
+          is_registered: true,
+          requires_2fa: true,
+          message: 'Kode OTP verifikasi masuk telah dikirim ke email terdaftar Anda.',
+          data: {
+            requires_2fa: true,
+            email: user.email,
+          },
+          meta: { timestamp: new Date().toISOString() },
+        });
+        return;
       }
     } else {
       // Akun Google BELUM terdaftar di database
@@ -701,9 +1047,10 @@ export const googleLogin = async (req: Request, res: Response): Promise<void> =>
         await connection.beginTransaction();
 
         const targetRole = (role === 'pengunjung') ? 'pengunjung' : 'mitra';
+        const cleanPhone = phone && String(phone).trim() ? String(phone).trim() : null;
         const [insertUser]: any = await connection.query(
-          'INSERT INTO users (name, email, password_hash, role, is_active, google_id, avatar_url) VALUES (?, ?, NULL, ?, 1, ?, ?)',
-          [name, email.trim().toLowerCase(), targetRole, googleId || null, avatarUrl || null]
+          'INSERT INTO users (name, phone, email, password_hash, role, is_active, google_id, avatar_url) VALUES (?, ?, ?, NULL, ?, 1, ?, ?)',
+          [name, cleanPhone, email.trim().toLowerCase(), targetRole, googleId || null, avatarUrl || null]
         );
         const newUserId = insertUser.insertId;
 
@@ -714,7 +1061,7 @@ export const googleLogin = async (req: Request, res: Response): Promise<void> =>
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 1)`,
             [
               newUserId,
-              phone ? phone.trim() : '-',
+              cleanPhone || '-',
               'Toko ' + name,
               '-',
               new Date().getFullYear(),
@@ -723,11 +1070,6 @@ export const googleLogin = async (req: Request, res: Response): Promise<void> =>
               '[]'
             ]
           );
-        } else if (phone && phone.trim()) {
-          await connection.query(
-            'INSERT INTO user_addresses (user_id, recipient_name, phone, full_address, is_default) VALUES (?, ?, ?, ?, 1)',
-            [newUserId, name, phone.trim(), 'Belum ada alamat lengkap']
-          ).catch(() => {});
         }
 
         await connection.commit();
@@ -735,11 +1077,15 @@ export const googleLogin = async (req: Request, res: Response): Promise<void> =>
         user = {
           id: newUserId,
           name,
+          username: email.trim().toLowerCase().split('@')[0],
+          phone: cleanPhone,
           email: email.trim().toLowerCase(),
           role: targetRole,
           store_name: targetRole === 'mitra' ? ('Toko ' + name) : undefined,
           is_verified: targetRole === 'mitra' ? 0 : 1,
-          avatar_url: avatarUrl
+          avatar_url: avatarUrl,
+          two_factor_enabled: 0,
+          has_password: 0,
         };
       } catch (insertErr) {
         await connection.rollback();
@@ -750,6 +1096,28 @@ export const googleLogin = async (req: Request, res: Response): Promise<void> =>
     }
 
     const { token, refresh_token } = signTokenPair({ id: user.id, email: user.email, role: user.role, ver: user.token_version });
+
+    res.locals['userId'] = user.id;
+    res.locals['role'] = user.role;
+    if (user.role === 'mitra' && Number(user.is_verified) !== 1) {
+      applyMitraPendingAuthLog(res, {
+        userId: user.id,
+        email: user.email,
+        storeName: user.store_name,
+        ownerName: user.name,
+        isVerified: user.is_verified,
+        rejectionReason: user.rejection_reason,
+        isRegistration: users.length === 0,
+        authMethod: 'google',
+      });
+    } else {
+      res.locals['logCategory'] = 'auth';
+      res.locals['logEventName'] =
+        users.length > 0 ? 'auth.google_login.succeeded' : 'auth.google_register.succeeded';
+      res.locals['logSeverity'] = 'success';
+      res.locals['logOutcome'] = 'success';
+      res.locals['logMessage'] = `${users.length > 0 ? 'Login' : 'Pendaftaran'} Google berhasil untuk akun ${user.role} (${user.email})`;
+    }
 
     res.cookie('token', token, {
       httpOnly: true,
@@ -768,8 +1136,14 @@ export const googleLogin = async (req: Request, res: Response): Promise<void> =>
         refresh_token,
         id: user.id,
         name: user.name,
+        username: user.username,
+        phone: user.phone,
+        birth_date: user.birth_date || null,
+        gender: user.gender || null,
         email: user.email,
         role: user.role,
+        two_factor_enabled: Boolean(user.two_factor_enabled),
+        has_password: Boolean(user.has_password),
         store_name: user.store_name,
         is_verified: user.is_verified,
         rejection_reason: user.rejection_reason,
@@ -794,7 +1168,9 @@ export const getProfile = async (_req: Request, res: Response) => {
     const [rows]: any = await db.query(
       `SELECT u.id, u.name, u.email, u.role, u.avatar_url,
               u.phone, u.birth_date, u.gender,
-              SUBSTRING_INDEX(u.email, '@', 1) AS username,
+              u.two_factor_enabled, u.password_changed_at, u.google_id,
+              (u.password_hash IS NOT NULL AND u.password_hash != '') AS has_password,
+              COALESCE(NULLIF(TRIM(u.username), ''), SUBSTRING_INDEX(u.email, '@', 1)) AS username,
               m.store_name, m.whatsapp_number, m.workshop_address, 
               m.started_year, m.description, m.website, m.instagram, 
               m.banner_url, m.is_verified, m.rejection_reason,
@@ -809,7 +1185,15 @@ export const getProfile = async (_req: Request, res: Response) => {
       return res.status(404).json({ success: false, message: 'User tidak ditemukan' });
     }
 
-    return res.status(200).json({ success: true, data: rows[0] });
+    const profile = rows[0];
+    return res.status(200).json({
+      success: true,
+      data: {
+        ...profile,
+        two_factor_enabled: Boolean(profile.two_factor_enabled),
+        has_password: Boolean(profile.has_password),
+      },
+    });
   } catch (error) {
     console.error('Error getProfile:', error);
     return res.status(500).json({ success: false, message: 'Terjadi kesalahan server' });
@@ -821,7 +1205,8 @@ export const updateProfile = async (req: Request, res: Response) => {
     const userId = res.locals['userId'];
     if (!userId) return res.status(401).json({ success: false, message: 'Unauthorized' });
 
-    const ownerName = req.body.ownerName ?? req.body.nama;
+    const ownerName = req.body.ownerName ?? req.body.nama ?? req.body.name;
+    const rawUsername = req.body.username !== undefined ? String(req.body.username).trim().toLowerCase() : null;
     const storeName = req.body.storeName ?? req.body.nama_toko;
     const phone = req.body.phone ?? req.body.whatsapp_number;
     const address = req.body.address ?? req.body.alamat ?? req.body.workshop_address;
@@ -829,6 +1214,25 @@ export const updateProfile = async (req: Request, res: Response) => {
     const description = req.body.description ?? req.body.deskripsi;
     const website = req.body.website;
     const instagram = req.body.instagram;
+
+    if (rawUsername && rawUsername.length > 0) {
+      if (!/^[a-z0-9_]{3,30}$/.test(rawUsername)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Username harus 3-30 karakter dan hanya boleh berisi huruf, angka, atau garis bawah (_).',
+        });
+      }
+      const [existingUn]: any = await db.query(
+        'SELECT id FROM users WHERE username = ? AND id != ? LIMIT 1',
+        [rawUsername, userId]
+      );
+      if (existingUn && existingUn.length > 0) {
+        return res.status(409).json({
+          success: false,
+          message: 'Username sudah dipakai oleh pengguna lain.',
+        });
+      }
+    }
 
     const files = req.files as { [fieldname: string]: Express.Multer.File[] } | undefined;
 
@@ -840,16 +1244,18 @@ export const updateProfile = async (req: Request, res: Response) => {
     // Update data akun di tabel users (semua role)
     await db.query(
       `UPDATE users 
-       SET name = COALESCE(?, name), 
+       SET name = COALESCE(?, name),
+           username = COALESCE(?, username),
            avatar_url = COALESCE(?, avatar_url),
            phone = COALESCE(?, phone),
            birth_date = COALESCE(?, birth_date),
            gender = COALESCE(?, gender)
        WHERE id = ?`,
       [
-        ownerName ?? null,
+        ownerName ? String(ownerName).trim() : null,
+        rawUsername && rawUsername.length > 0 ? rawUsername : null,
         avatarPath,
-        phone ?? null,
+        phone ? String(phone).trim() : null,
         birthDate ? String(birthDate).slice(0, 10) : null,
         ['L', 'P'].includes(gender) ? gender : null,
         userId
@@ -860,19 +1266,30 @@ export const updateProfile = async (req: Request, res: Response) => {
     const userRole = roleRows?.[0]?.role;
 
     // Perilaku mitra: profil toko ikut diperbarui. Customer (pengunjung)
-    // TIDAK boleh membuat baris mitra_profiles palsu.
-    if (userRole === 'pengunjung') {
+    // maupun admin TIDAK boleh membuat baris mitra_profiles palsu.
+    if (userRole === 'pengunjung' || userRole === 'admin') {
       const [rows2]: any = await db.query(
-        `SELECT u.id, u.name, u.username, u.email, u.role, u.avatar_url,
-                u.phone, u.birth_date, u.gender
+        `SELECT u.id, u.name,
+                COALESCE(NULLIF(TRIM(u.username), ''), SUBSTRING_INDEX(u.email, '@', 1)) AS username,
+                u.email, u.role, u.avatar_url,
+                u.phone, u.birth_date, u.gender,
+                u.two_factor_enabled, u.password_changed_at,
+                (u.password_hash IS NOT NULL AND u.password_hash != '') AS has_password
          FROM users u WHERE u.id = ?`,
         [userId]
       );
 
+      const p = rows2 && rows2.length > 0 ? rows2[0] : null;
       return res.status(200).json({
         success: true,
         message: 'Profil berhasil diperbarui',
-        data: rows2 && rows2.length > 0 ? rows2[0] : null
+        data: p
+          ? {
+            ...p,
+            two_factor_enabled: Boolean(p.two_factor_enabled),
+            has_password: Boolean(p.has_password),
+          }
+          : null,
       });
     }
 
@@ -890,6 +1307,7 @@ export const updateProfile = async (req: Request, res: Response) => {
              description = COALESCE(?, description), 
              website = COALESCE(?, website), 
              instagram = COALESCE(?, instagram),
+             avatar_url = COALESCE(?, avatar_url),
              banner_url = COALESCE(?, banner_url)
          WHERE user_id = ?`,
         [
@@ -900,6 +1318,7 @@ export const updateProfile = async (req: Request, res: Response) => {
           description ?? null,
           website ?? null,
           instagram ?? null,
+          avatarPath,
           bannerPath,
           userId
         ]
@@ -909,7 +1328,7 @@ export const updateProfile = async (req: Request, res: Response) => {
       await db.query(
         `INSERT INTO mitra_profiles 
          (user_id, store_name, whatsapp_number, workshop_address, started_year, description, website, instagram, banner_url, is_verified, is_active) 
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
         [
           userId,
           storeName ?? null,
@@ -919,7 +1338,8 @@ export const updateProfile = async (req: Request, res: Response) => {
           description ?? null,
           website ?? null,
           instagram ?? null,
-          bannerPath
+          bannerPath,
+          userRole === 'admin' ? 1 : 0
         ]
       );
     }
@@ -936,6 +1356,19 @@ export const updateProfile = async (req: Request, res: Response) => {
        WHERE u.id = ?`,
       [userId]
     );
+
+    if (userRole === 'mitra' && rows?.[0] && Number(rows[0].is_verified) !== 1) {
+      res.locals['logCategory'] = 'product_store';
+      res.locals['logEventName'] = 'mitra.profile.updated_pending_verification';
+      res.locals['logSeverity'] = 'info';
+      res.locals['logOutcome'] = 'pending';
+      res.locals['logMessage'] = `Mitra "${rows[0].store_name || rows[0].name}" memperbarui profil toko — masih menunggu verifikasi Admin (PENDING)`;
+      res.locals['logMetadata'] = {
+        storeName: rows[0].store_name || null,
+        isVerified: Number(rows[0].is_verified ?? 0),
+        verificationStatus: 'pending_approval',
+      };
+    }
 
     return res.status(200).json({
       success: true,
@@ -1196,7 +1629,7 @@ export const verifyOtp = async (req: Request, res: Response): Promise<void> => {
         `SELECT o.id, o.otp_code, o.expires_at 
          FROM user_otps o
          JOIN users u ON o.user_id = u.id
-         WHERE LOWER(TRIM(u.email)) = ? AND o.otp_code = ? AND o.is_used = 0 AND o.expires_at > NOW()
+         WHERE LOWER(TRIM(u.email)) = ? AND o.otp_type = 'reset_password' AND o.otp_code = ? AND o.is_used = 0 AND o.expires_at > NOW()
          ORDER BY o.id DESC LIMIT 1`,
         [cleanEmail, cleanOtp]
       );
@@ -1206,10 +1639,10 @@ export const verifyOtp = async (req: Request, res: Response): Promise<void> => {
           code: cleanOtp,
           email: cleanEmail,
           verified: true,
+          type: 'reset_password',
           expiresAt: Date.now() + 5 * 60 * 1000,
         };
         otpStore.set(cleanEmail, entry);
-        await db.query('UPDATE user_otps SET is_used = 1 WHERE id = ?', [dbOtps[0].id]);
       }
     }
 
@@ -1264,8 +1697,8 @@ export const resetPassword = async (req: Request, res: Response): Promise<void> 
   try {
     const { email, newPassword, otp } = req.body;
 
-    if (!email || !newPassword) {
-      res.status(400).json({ success: false, message: 'Email dan kata sandi baru wajib diisi' });
+    if (!email || !newPassword || !otp) {
+      res.status(400).json({ success: false, message: 'Email, kode OTP, dan kata sandi baru wajib diisi' });
       return;
     }
 
@@ -1274,37 +1707,37 @@ export const resetPassword = async (req: Request, res: Response): Promise<void> 
       return;
     }
 
-    // Cek OTP terverifikasi atau kode OTP cocok
+    // Cek kode OTP valid dari memori atau tabel user_otps
     const cleanEmail = email.toString().trim().toLowerCase();
     const cleanOtp = otp.toString().trim();
 
     let entry = otpStore.get(cleanEmail);
+    let matchedDbOtpId: number | null = null;
 
-    if (!entry) {
-      // Fallback pengecekan ke tabel database user_otps untuk lingkungan Serverless
+    if (!entry || entry.code !== cleanOtp) {
+      // Fallback pengecekan ke tabel database user_otps untuk lingkungan Serverless / post-restart
       const [dbOtps]: any = await db.query(
         `SELECT o.id, o.otp_code, o.expires_at 
          FROM user_otps o
          JOIN users u ON o.user_id = u.id
-         WHERE LOWER(TRIM(u.email)) = ? AND o.otp_code = ? AND o.is_used = 0 AND o.expires_at > NOW()
+         WHERE LOWER(TRIM(u.email)) = ? AND o.otp_type = 'reset_password' AND o.otp_code = ? AND o.is_used = 0 AND o.expires_at > NOW()
          ORDER BY o.id DESC LIMIT 1`,
         [cleanEmail, cleanOtp]
       );
 
       if (dbOtps && dbOtps.length > 0) {
+        matchedDbOtpId = Number(dbOtps[0].id);
         entry = {
           code: cleanOtp,
           email: cleanEmail,
           verified: true,
+          type: 'reset_password',
           expiresAt: Date.now() + 5 * 60 * 1000,
         };
-        otpStore.set(cleanEmail, entry);
-        await db.query('UPDATE user_otps SET is_used = 1 WHERE id = ?', [dbOtps[0].id]);
       }
     }
-    const isOtpValid = entry && (entry.verified || (cleanOtp && entry.code === cleanOtp));
 
-    if (!entry || !isOtpValid) {
+    if (!entry || entry.code !== cleanOtp) {
       res.status(400).json({
         success: false,
         message: 'OTP belum diverifikasi atau tidak valid. Silakan verifikasi OTP terlebih dahulu.',
@@ -1327,8 +1760,20 @@ export const resetPassword = async (req: Request, res: Response): Promise<void> 
       return;
     }
 
+    const targetUserId = Number(users[0].id);
     const passwordHash = await bcrypt.hash(newPassword, 10);
-    await db.query('UPDATE users SET password_hash = ? WHERE LOWER(TRIM(email)) = ?', [passwordHash, cleanEmail]);
+    await db.query(
+      'UPDATE users SET password_hash = ?, password_changed_at = NOW(), token_version = token_version + 1 WHERE id = ?',
+      [passwordHash, targetUserId]
+    );
+
+    await db.query(
+      "UPDATE user_otps SET is_used = 1 WHERE user_id = ? AND otp_type = 'reset_password' AND is_used = 0",
+      [targetUserId]
+    );
+    if (matchedDbOtpId) {
+      await db.query('UPDATE user_otps SET is_used = 1 WHERE id = ?', [matchedDbOtpId]);
+    }
 
     // Hapus OTP dari store setelah berhasil reset
     otpStore.delete(cleanEmail);
@@ -1462,18 +1907,15 @@ export const verifyRegisterOtp = async (req: Request, res: Response): Promise<vo
 
     const passwordHash = await bcrypt.hash(regPass, 10);
     const regUsername = (req.body.username || regData.username || '').trim().toLowerCase() || null;
+    const cleanRegPhone = regPhone && String(regPhone).trim() ? String(regPhone).trim() : null;
+    const rawBirth = req.body.birth_date ?? req.body.birthDate ?? regData.birth_date ?? null;
+    const cleanBirthDate = rawBirth ? String(rawBirth).slice(0, 10) : null;
+
     const [result]: any = await db.query(
-      'INSERT INTO users (name, username, email, password_hash, role, is_active) VALUES (?, ?, ?, ?, "pengunjung", 1)',
-      [regName, regUsername, cleanEmail, passwordHash]
+      'INSERT INTO users (name, username, phone, birth_date, email, password_hash, password_changed_at, role, is_active) VALUES (?, ?, ?, ?, ?, ?, NOW(), "pengunjung", 1)',
+      [regName, regUsername, cleanRegPhone, cleanBirthDate, cleanEmail, passwordHash]
     );
     const newUserId = result.insertId;
-
-    if (regPhone && regPhone.trim()) {
-      await db.query(
-        'INSERT INTO user_addresses (user_id, recipient_name, phone, full_address, is_default) VALUES (?, ?, ?, ?, 1) ON DUPLICATE KEY UPDATE phone = VALUES(phone)',
-        [newUserId, regName, regPhone.trim(), 'Belum ada alamat lengkap']
-      ).catch(() => {});
-    }
 
     otpStore.delete(cleanEmail);
 
@@ -1487,8 +1929,13 @@ export const verifyRegisterOtp = async (req: Request, res: Response): Promise<vo
         refresh_token,
         id: newUserId,
         name: regName,
+        username: regUsername || cleanEmail.split('@')[0],
+        phone: cleanRegPhone,
+        birth_date: cleanBirthDate,
         email: cleanEmail,
         role: 'pengunjung',
+        two_factor_enabled: false,
+        has_password: true,
       },
       meta: { timestamp: new Date().toISOString() }
     });
@@ -1683,5 +2130,407 @@ export const refreshToken = async (req: Request, res: Response): Promise<void> =
     console.error('Error refresh token:', error);
     res.status(500).json({ success: false, message: 'Terjadi kesalahan pada server' });
     return;
+  }
+};
+
+// ============================================================
+// VERIFIKASI OTP LOGIN (2FA) & KIRIM ULANG OTP LOGIN
+// ============================================================
+export const verifyLoginOtp = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { email, otp } = req.body;
+    if (!email || !otp) {
+      res.status(400).json({ success: false, message: 'Email dan kode OTP wajib diisi.' });
+      return;
+    }
+
+    const cleanEmail = String(email).trim().toLowerCase();
+    const cleanOtp = String(otp).trim();
+
+    const [users]: any = await db.query(
+      `SELECT u.id, u.name, COALESCE(NULLIF(TRIM(u.username), ''), SUBSTRING_INDEX(u.email, '@', 1)) AS username,
+              u.phone, u.birth_date, u.gender, u.email, u.role, u.is_active, u.avatar_url,
+              u.token_version, u.two_factor_enabled, u.password_changed_at,
+              (u.password_hash IS NOT NULL AND u.password_hash != '') AS has_password,
+              m.store_name, m.is_verified, m.rejection_reason
+       FROM users u
+       LEFT JOIN mitra_profiles m ON u.id = m.user_id
+       WHERE u.email = ? LIMIT 1`,
+      [cleanEmail]
+    );
+
+    if (!users || users.length === 0) {
+      res.status(404).json({ success: false, message: 'Akun tidak ditemukan.' });
+      return;
+    }
+
+    const user = users[0];
+    if (user.is_active === 0) {
+      res.status(403).json({ success: false, message: 'Akun Anda sedang dinonaktifkan.' });
+      return;
+    }
+
+    const [otpRows]: any = await db.query(
+      `SELECT id, otp_code, expires_at
+       FROM user_otps
+       WHERE user_id = ? AND otp_type = 'login' AND is_used = 0
+       ORDER BY id DESC LIMIT 1`,
+      [user.id]
+    );
+
+    if (!otpRows || otpRows.length === 0) {
+      res.status(400).json({
+        success: false,
+        message: 'Kode OTP login tidak ditemukan atau sudah digunakan. Silakan minta kode baru.',
+      });
+      return;
+    }
+
+    const otpRow = otpRows[0];
+    if (new Date(otpRow.expires_at).getTime() < Date.now()) {
+      await db.query('UPDATE user_otps SET is_used = 1 WHERE id = ?', [otpRow.id]);
+      res.status(400).json({
+        success: false,
+        message: 'Kode OTP telah kedaluwarsa. Silakan kirim ulang kode OTP.',
+      });
+      return;
+    }
+
+    if (String(otpRow.otp_code).trim() !== cleanOtp) {
+      res.status(400).json({
+        success: false,
+        message: 'Kode OTP salah. Silakan periksa kembali email Anda.',
+      });
+      return;
+    }
+
+    await db.query('UPDATE user_otps SET is_used = 1 WHERE id = ?', [otpRow.id]);
+
+    const { token, refresh_token } = signTokenPair({
+      id: user.id,
+      email: user.email,
+      role: user.role,
+      ver: user.token_version,
+    });
+
+    res.locals['userId'] = user.id;
+    res.locals['role'] = user.role;
+    if (user.role === 'mitra' && Number(user.is_verified) !== 1) {
+      applyMitraPendingAuthLog(res, {
+        userId: user.id,
+        email: user.email,
+        storeName: user.store_name,
+        ownerName: user.name,
+        isVerified: user.is_verified,
+        rejectionReason: user.rejection_reason,
+        authMethod: 'otp_2fa',
+      });
+    } else {
+      res.locals['logCategory'] = 'auth';
+      res.locals['logEventName'] = 'auth.login.succeeded';
+      res.locals['logSeverity'] = 'success';
+      res.locals['logOutcome'] = 'success';
+      res.locals['logMessage'] = `Verifikasi OTP 2FA & login berhasil untuk akun ${user.role} (${user.email})`;
+    }
+
+    res.cookie('token', token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'lax',
+      maxAge: 24 * 60 * 60 * 1000,
+    });
+
+    res.status(200).json({
+      success: true,
+      message: 'Verifikasi OTP berhasil! Selamat datang kembali.',
+      data: {
+        token,
+        refresh_token,
+        id: user.id,
+        name: user.name,
+        username: user.username,
+        phone: user.phone,
+        birth_date: user.birth_date,
+        gender: user.gender,
+        email: user.email,
+        role: user.role,
+        avatar_url: user.avatar_url,
+        two_factor_enabled: Boolean(user.two_factor_enabled),
+        password_changed_at: user.password_changed_at,
+        has_password: Boolean(user.has_password),
+        store_name: user.store_name,
+        is_verified: user.is_verified,
+        rejection_reason: user.rejection_reason,
+      },
+      meta: { timestamp: new Date().toISOString() },
+    });
+  } catch (error) {
+    console.error('Error verifyLoginOtp:', error);
+    res.status(500).json({ success: false, message: 'Gagal memverifikasi kode OTP login.' });
+  }
+};
+
+export const resendLoginOtp = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { email } = req.body;
+    if (!email) {
+      res.status(400).json({ success: false, message: 'Email wajib diisi.' });
+      return;
+    }
+
+    const cleanEmail = String(email).trim().toLowerCase();
+    const [users]: any = await db.query(
+      'SELECT id, name, email, is_active FROM users WHERE email = ? LIMIT 1',
+      [cleanEmail]
+    );
+
+    if (!users || users.length === 0) {
+      res.status(404).json({ success: false, message: 'Akun tidak ditemukan.' });
+      return;
+    }
+
+    const user = users[0];
+    if (user.is_active === 0) {
+      res.status(403).json({ success: false, message: 'Akun sedang dinonaktifkan.' });
+      return;
+    }
+
+    const loginOtp = Math.floor(100000 + Math.random() * 900000).toString();
+    await db.query(
+      "UPDATE user_otps SET is_used = 1 WHERE user_id = ? AND otp_type = 'login' AND is_used = 0",
+      [user.id]
+    );
+    await db.query(
+      "INSERT INTO user_otps (user_id, otp_code, otp_type, expires_at, is_used) VALUES (?, ?, 'login', DATE_ADD(NOW(), INTERVAL 5 MINUTE), 0)",
+      [user.id, loginOtp]
+    );
+
+    await sendOTPEmail(user.email, loginOtp, user.name, 'login');
+
+    res.status(200).json({
+      success: true,
+      message: 'Kode OTP baru telah dikirim ke email Anda.',
+      data: { email: user.email },
+    });
+  } catch (error) {
+    console.error('Error resendLoginOtp:', error);
+    res.status(500).json({ success: false, message: 'Gagal mengirim ulang kode OTP login.' });
+  }
+};
+
+// ============================================================
+// AUTENTIKASI 2 LANGKAH (2FA) — AKTIVASI & PENONAKTIFAN VIA EMAIL ASLI
+// ============================================================
+export const requestTwoFactorOtp = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const userId = res.locals['userId'];
+    const { action } = req.body; // 'enable' | 'disable'
+    if (!userId) {
+      res.status(401).json({ success: false, message: 'Unauthorized' });
+      return;
+    }
+
+    const [users]: any = await db.query(
+      'SELECT id, name, email, two_factor_enabled FROM users WHERE id = ? LIMIT 1',
+      [userId]
+    );
+    if (!users || users.length === 0) {
+      res.status(404).json({ success: false, message: 'Pengguna tidak ditemukan.' });
+      return;
+    }
+
+    const user = users[0];
+    const otpType = action === 'disable' ? '2fa_disable' : '2fa_enable';
+    const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
+
+    await db.query(
+      'UPDATE user_otps SET is_used = 1 WHERE user_id = ? AND otp_type = ? AND is_used = 0',
+      [user.id, otpType]
+    );
+    await db.query(
+      'INSERT INTO user_otps (user_id, otp_code, otp_type, expires_at, is_used) VALUES (?, ?, ?, DATE_ADD(NOW(), INTERVAL 5 MINUTE), 0)',
+      [user.id, otpCode, otpType]
+    );
+
+    await sendOTPEmail(user.email, otpCode, user.name, otpType);
+
+    res.status(200).json({
+      success: true,
+      message: `Kode OTP konfirmasi telah dikirim ke ${user.email}.`,
+      data: { email: user.email, action },
+    });
+  } catch (error) {
+    console.error('Error requestTwoFactorOtp:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Gagal mengirim email kode OTP 2FA. Periksa koneksi server email.',
+    });
+  }
+};
+
+export const verifyTwoFactorOtp = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const userId = res.locals['userId'];
+    const { action, otp } = req.body;
+    if (!userId) {
+      res.status(401).json({ success: false, message: 'Unauthorized' });
+      return;
+    }
+
+    const otpType = action === 'disable' ? '2fa_disable' : '2fa_enable';
+    const [otpRows]: any = await db.query(
+      `SELECT id, otp_code, expires_at
+       FROM user_otps
+       WHERE user_id = ? AND otp_type = ? AND is_used = 0
+       ORDER BY id DESC LIMIT 1`,
+      [userId, otpType]
+    );
+
+    if (!otpRows || otpRows.length === 0) {
+      res.status(400).json({
+        success: false,
+        message: 'Kode OTP tidak ditemukan atau sudah digunakan. Silakan kirim ulang kode.',
+      });
+      return;
+    }
+
+    const otpRow = otpRows[0];
+    if (new Date(otpRow.expires_at).getTime() < Date.now()) {
+      await db.query('UPDATE user_otps SET is_used = 1 WHERE id = ?', [otpRow.id]);
+      res.status(400).json({
+        success: false,
+        message: 'Kode OTP telah kedaluwarsa. Silakan kirim ulang kode OTP.',
+      });
+      return;
+    }
+
+    if (String(otpRow.otp_code).trim() !== String(otp).trim()) {
+      res.status(400).json({
+        success: false,
+        message: 'Kode OTP salah. Silakan periksa kembali kotak masuk email Anda.',
+      });
+      return;
+    }
+
+    const enabledVal = action === 'disable' ? 0 : 1;
+    await db.query('UPDATE user_otps SET is_used = 1 WHERE id = ?', [otpRow.id]);
+    await db.query('UPDATE users SET two_factor_enabled = ? WHERE id = ?', [enabledVal, userId]);
+
+    res.status(200).json({
+      success: true,
+      message:
+        enabledVal === 1
+          ? 'Autentikasi 2 Langkah (2FA) berhasil diaktifkan.'
+          : 'Autentikasi 2 Langkah (2FA) berhasil dinonaktifkan.',
+      data: { two_factor_enabled: Boolean(enabledVal) },
+    });
+  } catch (error) {
+    console.error('Error verifyTwoFactorOtp:', error);
+    res.status(500).json({ success: false, message: 'Gagal memverifikasi OTP 2FA.' });
+  }
+};
+
+// ============================================================
+// UBAH KATA SANDI PENGGUNA AKTIF & LOGOUT PERANGKAT LAIN
+// ============================================================
+export const changePassword = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const userId = res.locals['userId'];
+    const { currentPassword, newPassword } = req.body;
+    if (!userId) {
+      res.status(401).json({ success: false, message: 'Unauthorized' });
+      return;
+    }
+
+    if (!newPassword || String(newPassword).length < 8) {
+      res.status(400).json({
+        success: false,
+        message: 'Kata sandi baru minimal harus 8 karakter.',
+      });
+      return;
+    }
+
+    const [users]: any = await db.query(
+      'SELECT id, password_hash FROM users WHERE id = ? LIMIT 1',
+      [userId]
+    );
+    if (!users || users.length === 0) {
+      res.status(404).json({ success: false, message: 'Pengguna tidak ditemukan.' });
+      return;
+    }
+
+    const user = users[0];
+    if (user.password_hash) {
+      if (!currentPassword || !String(currentPassword).trim()) {
+        res.status(400).json({
+          success: false,
+          message: 'Kata sandi saat ini wajib diisi untuk verifikasi keamanan.',
+        });
+        return;
+      }
+      const matches = await bcrypt.compare(String(currentPassword), user.password_hash);
+      if (!matches) {
+        res.status(400).json({
+          success: false,
+          message: 'Kata sandi saat ini tidak sesuai.',
+        });
+        return;
+      }
+    }
+
+    const newHash = await bcrypt.hash(String(newPassword), 10);
+    await db.query(
+      'UPDATE users SET password_hash = ?, password_changed_at = NOW() WHERE id = ?',
+      [newHash, userId]
+    );
+
+    res.status(200).json({
+      success: true,
+      message: 'Kata sandi berhasil diperbarui!',
+      data: {
+        password_changed_at: new Date().toISOString(),
+        has_password: true,
+      },
+    });
+  } catch (error) {
+    console.error('Error changePassword:', error);
+    res.status(500).json({ success: false, message: 'Gagal memperbarui kata sandi.' });
+  }
+};
+
+export const logoutOtherDevices = async (_req: Request, res: Response): Promise<void> => {
+  try {
+    const userId = res.locals['userId'];
+    if (!userId) {
+      res.status(401).json({ success: false, message: 'Unauthorized' });
+      return;
+    }
+
+    await db.query('UPDATE users SET token_version = token_version + 1 WHERE id = ?', [userId]);
+    const [users]: any = await db.query(
+      'SELECT id, email, role, token_version FROM users WHERE id = ? LIMIT 1',
+      [userId]
+    );
+    if (!users || users.length === 0) {
+      res.status(404).json({ success: false, message: 'Pengguna tidak ditemukan.' });
+      return;
+    }
+
+    const user = users[0];
+    const { token, refresh_token } = signTokenPair({
+      id: user.id,
+      email: user.email,
+      role: user.role,
+      ver: user.token_version,
+    });
+
+    res.status(200).json({
+      success: true,
+      message: 'Seluruh sesi perangkat lain berhasil dikeluarkan.',
+      data: { token, refresh_token },
+    });
+  } catch (error) {
+    console.error('Error logoutOtherDevices:', error);
+    res.status(500).json({ success: false, message: 'Gagal mengeluarkan sesi perangkat lain.' });
   }
 };
