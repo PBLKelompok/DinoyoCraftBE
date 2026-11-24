@@ -127,39 +127,68 @@ const sendEmail = async (payload) => {
     });
 };
 exports.sendEmail = sendEmail;
+const EMAIL_ASSETS = {
+    logo: 'https://raw.githubusercontent.com/alifarda126/DinoyoCraftApp/main/assets/images/branding/Logo.png',
+    lockKey2fa: 'https://res.cloudinary.com/o2cur2h4/image/upload/v1795519177/dinoyocraft/email-assets/2fa-lock-key.gif',
+    otpShimmer: 'https://res.cloudinary.com/o2cur2h4/image/upload/v1795519178/dinoyocraft/email-assets/otp-shimmer-bar.gif',
+    otpVerify: 'https://res.cloudinary.com/o2cur2h4/image/upload/v1795519179/dinoyocraft/email-assets/otp-verify-mark.gif',
+};
+const escapeHtml = (str) => str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 const PURPOSE_COPY = {
     register: {
-        subject: 'Kode OTP Verifikasi Pendaftaran - DinoyoCraft',
-        heading: 'Kode Verifikasi Akun',
-        description: 'Berikut adalah kode One-Time Password (OTP) Anda untuk menyelesaikan pendaftaran akun DinoyoCraft:',
+        subject: 'Kode Verifikasi Akun — DinoyoCraft',
+        tag: 'VERIFIKASI',
+        heading: 'Verifikasi alamat email Anda',
+        description: 'Gunakan kode sekali pakai di bawah ini untuk menyelesaikan pendaftaran akun DinoyoCraft Anda.',
+        useLockAnimation: false,
     },
     reset_password: {
-        subject: 'Kode OTP Reset Kata Sandi - DinoyoCraft',
-        heading: 'Atur Ulang Kata Sandi',
-        description: 'Berikut adalah kode One-Time Password (OTP) Anda untuk mengatur ulang kata sandi akun DinoyoCraft:',
+        subject: 'Atur Ulang Kata Sandi — DinoyoCraft',
+        tag: 'KEAMANAN',
+        heading: 'Permintaan atur ulang kata sandi',
+        description: 'Masukkan kode verifikasi berikut untuk membuat kata sandi baru pada akun DinoyoCraft Anda.',
+        useLockAnimation: false,
     },
     login: {
-        subject: 'Kode OTP Masuk Akun (2FA) - DinoyoCraft',
-        heading: 'Verifikasi Masuk Akun (2FA)',
-        description: 'Kami mendeteksi percobaan masuk ke akun Anda yang dilindungi Autentikasi 2 Langkah. Masukkan kode OTP berikut di aplikasi DinoyoCraft:',
+        subject: 'Kode Masuk 2FA — DinoyoCraft',
+        tag: '2FA AKSES',
+        heading: 'Konfirmasi percobaan masuk',
+        description: 'Akun Anda dilindungi autentikasi dua langkah. Masukkan kode berikut untuk melanjutkan proses masuk.',
+        useLockAnimation: true,
     },
     '2fa_enable': {
-        subject: 'Kode OTP Aktivasi 2FA - DinoyoCraft',
-        heading: 'Aktivasi Autentikasi 2 Langkah',
-        description: 'Berikut adalah kode OTP untuk mengaktifkan fitur Autentikasi 2 Langkah (2FA) pada akun DinoyoCraft Anda:',
+        subject: 'Aktivasi Autentikasi Dua Langkah — DinoyoCraft',
+        tag: '2FA KEAMANAN',
+        heading: 'Aktifkan autentikasi dua langkah',
+        description: 'Masukkan kode verifikasi di bawah ini untuk mengunci dan melindungi akun DinoyoCraft Anda dengan autentikasi dua langkah.',
+        useLockAnimation: true,
     },
     '2fa_disable': {
-        subject: 'Kode OTP Penonaktifan 2FA - DinoyoCraft',
-        heading: 'Penonaktifan Autentikasi 2 Langkah',
-        description: 'Berikut adalah kode OTP untuk mengonfirmasi penonaktifan Autentikasi 2 Langkah (2FA) pada akun DinoyoCraft Anda:',
+        subject: 'Nonaktifkan Autentikasi Dua Langkah — DinoyoCraft',
+        tag: '2FA KEAMANAN',
+        heading: 'Konfirmasi penonaktifan 2FA',
+        description: 'Masukkan kode verifikasi berikut untuk menonaktifkan autentikasi dua langkah pada akun DinoyoCraft Anda.',
+        useLockAnimation: true,
     },
 };
 /**
- * Kirim kode OTP ke email asli user dengan template branded DinoyoCraft
+ * Kirim kode OTP ke email asli user dengan desain minimalis monokrom DinoyoCraft
  */
 const sendOTPEmail = async (toEmail, otpCode, recipientName = 'Pengguna', purpose = 'register') => {
-    const logoUrl = 'https://raw.githubusercontent.com/alifarda126/DinoyoCraftApp/main/assets/images/branding/Logo.png';
     const copy = PURPOSE_COPY[purpose] || PURPOSE_COPY.register;
+    const safeName = escapeHtml((recipientName || 'Pengguna').trim());
+    const safeOtp = escapeHtml(String(otpCode).trim());
+    const heroGifUrl = copy.useLockAnimation ? EMAIL_ASSETS.lockKey2fa : EMAIL_ASSETS.otpVerify;
+    const heroWidth = copy.useLockAnimation ? 80 : 56;
+    const heroHeight = 56;
+    const heroAlt = copy.useLockAnimation
+        ? 'Animasi kunci dan gembok keamanan 2FA DinoyoCraft'
+        : 'Animasi verifikasi OTP DinoyoCraft';
     const mailOptions = {
         from: (0, exports.getDefaultFromAddress)(),
         to: toEmail,
@@ -170,97 +199,127 @@ const sendOTPEmail = async (toEmail, otpCode, recipientName = 'Pengguna', purpos
       <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Kode OTP DinoyoCraft</title>
+        <meta name="color-scheme" content="light dark">
+        <meta name="supported-color-schemes" content="light dark">
+        <title>${copy.subject}</title>
+        <style>
+          @keyframes otpReveal {
+            0% { opacity: 0.25; transform: translateY(4px); letter-spacing: 0.18em; }
+            100% { opacity: 1; transform: translateY(0); letter-spacing: 0.28em; }
+          }
+          .otp-code-text {
+            animation: otpReveal 0.65s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+          }
+        </style>
       </head>
-      <body style="margin: 0; padding: 0; background-color: #F8F6F2; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; -webkit-font-smoothing: antialiased;">
-        <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" style="background-color: #F8F6F2; padding: 40px 15px;">
+      <body style="margin: 0; padding: 0; background-color: #F4F4F5; font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; -webkit-font-smoothing: antialiased; color: #0A0A0A;">
+        <div style="display: none; max-height: 0; overflow: hidden; opacity: 0; mso-hide: all;">
+          Kode verifikasi DinoyoCraft Anda: ${safeOtp} — berlaku selama 5 menit.
+        </div>
+
+        <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" style="background-color: #F4F4F5; padding: 36px 16px;">
           <tr>
             <td align="center">
-              <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" style="max-width: 540px; background-color: #FFFFFF; border-radius: 20px; overflow: hidden; box-shadow: 0 10px 30px rgba(184, 92, 60, 0.08); border: 1px solid #ECE3DA;">
+              <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" style="max-width: 520px; background-color: #FFFFFF; border-radius: 16px; border: 1px solid #E4E4E7; overflow: hidden;">
+
+                <!-- Header Lockup -->
                 <tr>
-                  <td style="background: linear-gradient(135deg, #B85C3C 0%, #8C4328 100%); height: 8px;"></td>
-                </tr>
-                <tr>
-                  <td style="padding: 40px 36px 36px;">
-                    <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" style="margin-bottom: 24px;">
+                  <td style="padding: 28px 32px 22px; border-bottom: 1px solid #F0F0F2;">
+                    <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%">
                       <tr>
-                        <td align="center">
-                          <table role="presentation" border="0" cellpadding="0" cellspacing="0" style="margin: 0 auto 12px;">
+                        <td align="left" valign="middle">
+                          <table role="presentation" border="0" cellpadding="0" cellspacing="0">
                             <tr>
-                              <td align="center" style="width: 76px; height: 76px; padding: 0;">
-                                <img src="${logoUrl}" alt="DinoyoCraft Logo" width="76" height="76" style="width: 76px; height: 76px; object-fit: contain; display: block; border: 0;" />
+                              <td valign="middle" style="width: 36px; height: 36px; background-color: #FFFFFF; border: 1px solid #E4E4E7; border-radius: 10px; text-align: center; padding: 4px;">
+                                <img src="${EMAIL_ASSETS.logo}" alt="DinoyoCraft" width="26" height="26" style="width: 26px; height: 26px; object-fit: contain; display: block; margin: 0 auto; border: 0;" />
+                              </td>
+                              <td valign="middle" style="padding-left: 12px;">
+                                <span style="font-size: 16px; font-weight: 700; color: #0A0A0A; letter-spacing: -0.03em; line-height: 1;">DinoyoCraft</span>
                               </td>
                             </tr>
                           </table>
-                          <h1 style="margin: 0; font-size: 24px; font-weight: 800; color: #2D2A26; letter-spacing: -0.03em;">DinoyoCraft</h1>
-                          <p style="margin: 4px 0 0; font-size: 12px; font-weight: 700; color: #B85C3C; letter-spacing: 0.08em; text-transform: uppercase;">Sentra Kerajinan Keramik Dinoyo Malang</p>
                         </td>
-                      </tr>
-                    </table>
-
-                    <div style="height: 1px; background-color: #ECE3DA; margin-bottom: 24px;"></div>
-
-                    <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%">
-                      <tr>
-                        <td style="color: #4A4641; font-size: 15px; line-height: 1.65;">
-                          <p style="margin: 0 0 14px; font-size: 17px; font-weight: 700; color: #2D2A26;">
-                            ${copy.heading}
-                          </p>
-                          <p style="margin: 0 0 10px;">
-                            Halo <strong style="color: #2D2A26;">${recipientName}</strong>,
-                          </p>
-                          <p style="margin: 0 0 20px; color: #66615B; font-size: 14.5px;">
-                            ${copy.description}
-                          </p>
-                        </td>
-                      </tr>
-
-                      <tr>
-                        <td align="center">
-                          <div style="background: linear-gradient(135deg, #FFF9F6 0%, #FDF3EB 100%); border: 2px dashed #B85C3C; border-radius: 16px; padding: 22px 16px; margin: 0 auto 24px; text-align: center;">
-                            <span style="display: block; font-size: 11px; font-weight: 700; letter-spacing: 0.12em; color: #8C4328; text-transform: uppercase; margin-bottom: 8px;">
-                              Kode Verifikasi OTP Anda
-                            </span>
-                            <div style="font-family: 'Courier New', Courier, monospace; font-size: 38px; font-weight: 900; letter-spacing: 10px; color: #B85C3C; text-indent: 10px; padding: 4px 0;">
-                              ${otpCode}
-                            </div>
-                            <div style="margin-top: 10px;">
-                              <span style="display: inline-block; background: #FEE2E2; color: #DC2626; padding: 4px 14px; border-radius: 999px; font-size: 12px; font-weight: 600;">
-                                ⏱️ Berlaku selama 5 menit
-                              </span>
-                            </div>
-                          </div>
-                        </td>
-                      </tr>
-
-                      <tr>
-                        <td>
-                          <div style="background-color: #FAF8F5; border-left: 4px solid #B85C3C; border-radius: 0 10px 10px 0; padding: 14px 16px; margin-bottom: 28px;">
-                            <p style="margin: 0 0 6px; font-size: 13px; font-weight: 700; color: #2D2A26;">
-                              🛡️ Catatan Keamanan:
-                            </p>
-                            <p style="margin: 0; font-size: 12.5px; color: #706B65; line-height: 1.55;">
-                              &bull; Jangan pernah membagikan kode OTP ini kepada siapa pun, termasuk pihak yang mengatasnamakan DinoyoCraft.<br/>
-                              &bull; Jika Anda tidak melakukan aktivitas ini, abaikan pesan ini demi keamanan akun Anda.
-                            </p>
-                          </div>
-                        </td>
-                      </tr>
-
-                      <tr>
-                        <td style="border-top: 1px solid #ECE3DA; padding-top: 24px; text-align: center;">
-                          <p style="margin: 0 0 6px; font-size: 12px; color: #8A7968;">
-                            Butuh bantuan? Hubungi Tim Dukungan DinoyoCraft di <a href="mailto:csdinoyocraft@gmail.com" style="color: #B85C3C; font-weight: 600; text-decoration: none;">csdinoyocraft@gmail.com</a>
-                          </p>
-                          <p style="margin: 0; font-size: 11px; color: #A89B8C; line-height: 1.5;">
-                            Sentra Kerajinan Keramik Dinoyo, Kota Malang, Jawa Timur<br/>
-                            &copy; ${new Date().getFullYear()} DinoyoCraft. Hak Cipta Dilindungi.
-                          </p>
+                        <td align="right" valign="middle">
+                          <span style="display: inline-block; font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace; font-size: 10px; font-weight: 600; letter-spacing: 0.14em; color: #71717A; text-transform: uppercase; border: 1px solid #E4E4E7; border-radius: 6px; padding: 4px 8px; background-color: #FAFAFA;">
+                            ${copy.tag}
+                          </span>
                         </td>
                       </tr>
                     </table>
                   </td>
                 </tr>
+
+                <!-- Main Body -->
+                <tr>
+                  <td style="padding: 32px 32px 28px;">
+
+                    <!-- Animated Monochrome Icon -->
+                    <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" style="margin-bottom: 22px;">
+                      <tr>
+                        <td align="left">
+                          <img src="${heroGifUrl}" alt="${heroAlt}" width="${heroWidth}" height="${heroHeight}" style="width: ${heroWidth}px; height: ${heroHeight}px; display: block; border: 0; border-radius: 12px;" />
+                        </td>
+                      </tr>
+                    </table>
+
+                    <!-- Title & Copy -->
+                    <h1 style="margin: 0 0 10px; font-size: 21px; font-weight: 700; color: #0A0A0A; letter-spacing: -0.03em; line-height: 1.3;">
+                      ${copy.heading}
+                    </h1>
+                    <p style="margin: 0 0 6px; font-size: 14px; color: #27272A; line-height: 1.6;">
+                      Halo <strong>${safeName}</strong>,
+                    </p>
+                    <p style="margin: 0 0 26px; font-size: 14px; color: #52525B; line-height: 1.65;">
+                      ${copy.description}
+                    </p>
+
+                    <!-- OTP Surface -->
+                    <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" style="background-color: #FAFAFA; border: 1px solid #E4E4E7; border-radius: 12px; margin-bottom: 22px;">
+                      <tr>
+                        <td align="center" style="padding: 24px 20px 22px;">
+                          <div style="font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace; font-size: 10px; font-weight: 600; letter-spacing: 0.16em; color: #71717A; text-transform: uppercase; margin-bottom: 12px;">
+                            Kode Verifikasi Sekali Pakai
+                          </div>
+                          <div class="otp-code-text" style="font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace; font-size: 36px; font-weight: 700; letter-spacing: 0.28em; text-indent: 0.28em; color: #0A0A0A; line-height: 1.2; padding: 4px 0 16px;">
+                            ${safeOtp}
+                          </div>
+                          <table role="presentation" border="0" cellpadding="0" cellspacing="0" style="margin: 0 auto 14px;">
+                            <tr>
+                              <td align="center">
+                                <img src="${EMAIL_ASSETS.otpShimmer}" alt="" width="200" height="6" style="width: 200px; height: 6px; display: block; border: 0; border-radius: 999px;" />
+                              </td>
+                            </tr>
+                          </table>
+                          <div style="font-size: 12px; color: #71717A; line-height: 1.5;">
+                            Berlaku selama <strong style="color: #18181B; font-weight: 600;">5 menit</strong> &middot; Jangan bagikan kode ini kepada siapa pun
+                          </div>
+                        </td>
+                      </tr>
+                    </table>
+
+                    <!-- Quiet Security Note -->
+                    <p style="margin: 0; font-size: 12.5px; color: #71717A; line-height: 1.6;">
+                      Tim DinoyoCraft tidak pernah meminta kode verifikasi Anda melalui telepon, pesan instan, atau email. Jika Anda tidak melakukan permintaan ini, abaikan email ini dengan aman.
+                    </p>
+                  </td>
+                </tr>
+
+                <!-- Minimal Footer -->
+                <tr>
+                  <td style="padding: 20px 32px 24px; border-top: 1px solid #F0F0F2; background-color: #FAFAFA;">
+                    <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%">
+                      <tr>
+                        <td style="font-size: 11.5px; color: #71717A; line-height: 1.6;">
+                          <strong style="color: #18181B; font-weight: 600;">DinoyoCraft</strong> &mdash; Sentra Kerajinan Keramik Dinoyo, Malang<br/>
+                          <a href="https://dinoyocraft.my.id" style="color: #52525B; text-decoration: none;">dinoyocraft.my.id</a>
+                          &nbsp;&middot;&nbsp;
+                          &copy; ${new Date().getFullYear()} DinoyoCraft
+                        </td>
+                      </tr>
+                    </table>
+                  </td>
+                </tr>
+
               </table>
             </td>
           </tr>
