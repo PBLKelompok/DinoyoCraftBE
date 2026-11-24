@@ -129,9 +129,10 @@ const sendEmail = async (payload) => {
 exports.sendEmail = sendEmail;
 const EMAIL_ASSETS = {
     logo: 'https://raw.githubusercontent.com/alifarda126/DinoyoCraftApp/main/assets/images/branding/Logo.png',
-    lockKey2fa: 'https://res.cloudinary.com/o2cur2h4/image/upload/v1795519177/dinoyocraft/email-assets/2fa-lock-key.gif',
-    otpShimmer: 'https://res.cloudinary.com/o2cur2h4/image/upload/v1795519178/dinoyocraft/email-assets/otp-shimmer-bar.gif',
-    otpVerify: 'https://res.cloudinary.com/o2cur2h4/image/upload/v1795519179/dinoyocraft/email-assets/otp-verify-mark.gif',
+    glassBg: 'https://res.cloudinary.com/o2cur2h4/image/upload/v1795519562/dinoyocraft/email-assets/email-glass-bg.png',
+    lockKey2fa: 'https://res.cloudinary.com/o2cur2h4/image/upload/v1795519564/dinoyocraft/email-assets/2fa-lock-key-glass.gif',
+    otpShimmer: 'https://res.cloudinary.com/o2cur2h4/image/upload/v1795519566/dinoyocraft/email-assets/otp-shimmer-glass.gif',
+    otpVerify: 'https://res.cloudinary.com/o2cur2h4/image/upload/v1795519565/dinoyocraft/email-assets/otp-verify-glass.gif',
 };
 const escapeHtml = (str) => str
     .replace(/&/g, '&amp;')
@@ -184,8 +185,8 @@ const sendOTPEmail = async (toEmail, otpCode, recipientName = 'Pengguna', purpos
     const safeName = escapeHtml((recipientName || 'Pengguna').trim());
     const safeOtp = escapeHtml(String(otpCode).trim());
     const heroGifUrl = copy.useLockAnimation ? EMAIL_ASSETS.lockKey2fa : EMAIL_ASSETS.otpVerify;
-    const heroWidth = copy.useLockAnimation ? 80 : 56;
-    const heroHeight = 56;
+    const heroWidth = copy.useLockAnimation ? 96 : 64;
+    const heroHeight = copy.useLockAnimation ? 61 : 64;
     const heroAlt = copy.useLockAnimation
         ? 'Animasi kunci dan gembok keamanan 2FA DinoyoCraft'
         : 'Animasi verifikasi OTP DinoyoCraft';
@@ -199,8 +200,8 @@ const sendOTPEmail = async (toEmail, otpCode, recipientName = 'Pengguna', purpos
       <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <meta name="color-scheme" content="light dark">
-        <meta name="supported-color-schemes" content="light dark">
+        <meta name="color-scheme" content="dark light">
+        <meta name="supported-color-schemes" content="dark light">
         <title>${copy.subject}</title>
         <style>
           @keyframes otpReveal {
@@ -212,35 +213,36 @@ const sendOTPEmail = async (toEmail, otpCode, recipientName = 'Pengguna', purpos
           }
         </style>
       </head>
-      <body style="margin: 0; padding: 0; background-color: #F4F4F5; font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; -webkit-font-smoothing: antialiased; color: #0A0A0A;">
+      <body style="margin: 0; padding: 0; background-color: #0D0D10; font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; -webkit-font-smoothing: antialiased; color: #FFFFFF;">
         <div style="display: none; max-height: 0; overflow: hidden; opacity: 0; mso-hide: all;">
           Kode verifikasi DinoyoCraft Anda: ${safeOtp} — berlaku selama 5 menit.
         </div>
 
-        <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" style="background-color: #F4F4F5; padding: 36px 16px;">
+        <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" style="background-color: #0D0D10; background-image: linear-gradient(145deg, #0A0A0C 0%, #1C1C22 50%, #101014 100%); padding: 32px 14px;">
           <tr>
             <td align="center">
-              <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" style="max-width: 520px; background-color: #FFFFFF; border-radius: 16px; border: 1px solid #E4E4E7; overflow: hidden;">
+              <!-- Outer Monochrome Glassmorphism Canvas -->
+              <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" background="${EMAIL_ASSETS.glassBg}" style="max-width: 520px; background-color: #16161B; background-image: url('${EMAIL_ASSETS.glassBg}'); background-size: cover; background-position: center top; background-repeat: no-repeat; border-radius: 20px; border: 1px solid rgba(255, 255, 255, 0.16); overflow: hidden;">
 
-                <!-- Header Lockup -->
+                <!-- Header Lockup (Frosted Glass Strip) -->
                 <tr>
-                  <td style="padding: 28px 32px 22px; border-bottom: 1px solid #F0F0F2;">
+                  <td style="padding: 24px 28px 20px; background-color: rgba(10, 10, 13, 0.48); border-bottom: 1px solid rgba(255, 255, 255, 0.12); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);">
                     <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%">
                       <tr>
                         <td align="left" valign="middle">
                           <table role="presentation" border="0" cellpadding="0" cellspacing="0">
                             <tr>
-                              <td valign="middle" style="width: 36px; height: 36px; background-color: #FFFFFF; border: 1px solid #E4E4E7; border-radius: 10px; text-align: center; padding: 4px;">
-                                <img src="${EMAIL_ASSETS.logo}" alt="DinoyoCraft" width="26" height="26" style="width: 26px; height: 26px; object-fit: contain; display: block; margin: 0 auto; border: 0;" />
+                              <td valign="middle" style="width: 34px; height: 34px; background-color: #FFFFFF; border: 1px solid rgba(255, 255, 255, 0.35); border-radius: 10px; text-align: center; padding: 4px;">
+                                <img src="${EMAIL_ASSETS.logo}" alt="DinoyoCraft" width="24" height="24" style="width: 24px; height: 24px; object-fit: contain; display: block; margin: 0 auto; border: 0;" />
                               </td>
-                              <td valign="middle" style="padding-left: 12px;">
-                                <span style="font-size: 16px; font-weight: 700; color: #0A0A0A; letter-spacing: -0.03em; line-height: 1;">DinoyoCraft</span>
+                              <td valign="middle" style="padding-left: 11px;">
+                                <span style="font-size: 16px; font-weight: 700; color: #FFFFFF; letter-spacing: -0.03em; line-height: 1;">DinoyoCraft</span>
                               </td>
                             </tr>
                           </table>
                         </td>
                         <td align="right" valign="middle">
-                          <span style="display: inline-block; font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace; font-size: 10px; font-weight: 600; letter-spacing: 0.14em; color: #71717A; text-transform: uppercase; border: 1px solid #E4E4E7; border-radius: 6px; padding: 4px 8px; background-color: #FAFAFA;">
+                          <span style="display: inline-block; font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace; font-size: 10px; font-weight: 600; letter-spacing: 0.14em; color: #E4E4E7; text-transform: uppercase; border: 1px solid rgba(255, 255, 255, 0.22); border-radius: 999px; padding: 5px 10px; background-color: rgba(255, 255, 255, 0.08);">
                             ${copy.tag}
                           </span>
                         </td>
@@ -249,38 +251,46 @@ const sendOTPEmail = async (toEmail, otpCode, recipientName = 'Pengguna', purpos
                   </td>
                 </tr>
 
-                <!-- Main Body -->
+                <!-- Main Frosted Body -->
                 <tr>
-                  <td style="padding: 32px 32px 28px;">
+                  <td style="padding: 32px 28px 28px; background-color: rgba(12, 12, 16, 0.36);">
 
-                    <!-- Animated Monochrome Icon -->
-                    <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" style="margin-bottom: 22px;">
+                    <!-- Title (Centered) -->
+                    <h1 style="margin: 0 0 22px; text-align: center; font-size: 22px; font-weight: 700; color: #FFFFFF; letter-spacing: -0.03em; line-height: 1.3;">
+                      ${copy.heading}
+                    </h1>
+
+                    <!-- Centered Animated Monochrome Glass Icon (Below Title) -->
+                    <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" style="margin-bottom: 24px;">
                       <tr>
-                        <td align="left">
-                          <img src="${heroGifUrl}" alt="${heroAlt}" width="${heroWidth}" height="${heroHeight}" style="width: ${heroWidth}px; height: ${heroHeight}px; display: block; border: 0; border-radius: 12px;" />
+                        <td align="center">
+                          <table role="presentation" border="0" cellpadding="0" cellspacing="0" style="margin: 0 auto; border-radius: 16px; border: 1px solid rgba(255, 255, 255, 0.24); overflow: hidden; background-color: rgba(255, 255, 255, 0.06);">
+                            <tr>
+                              <td align="center" style="padding: 0; line-height: 0;">
+                                <img src="${heroGifUrl}" alt="${heroAlt}" width="${heroWidth}" height="${heroHeight}" style="width: ${heroWidth}px; height: ${heroHeight}px; display: block; border: 0; border-radius: 15px;" />
+                              </td>
+                            </tr>
+                          </table>
                         </td>
                       </tr>
                     </table>
 
-                    <!-- Title & Copy -->
-                    <h1 style="margin: 0 0 10px; font-size: 21px; font-weight: 700; color: #0A0A0A; letter-spacing: -0.03em; line-height: 1.3;">
-                      ${copy.heading}
-                    </h1>
-                    <p style="margin: 0 0 6px; font-size: 14px; color: #27272A; line-height: 1.6;">
-                      Halo <strong>${safeName}</strong>,
+                    <!-- Copy -->
+                    <p style="margin: 0 0 6px; text-align: center; font-size: 14.5px; color: #F4F4F5; line-height: 1.6;">
+                      Halo <strong style="color: #FFFFFF;">${safeName}</strong>,
                     </p>
-                    <p style="margin: 0 0 26px; font-size: 14px; color: #52525B; line-height: 1.65;">
+                    <p style="margin: 0 auto 26px; max-width: 400px; text-align: center; font-size: 13.5px; color: #D4D4D8; line-height: 1.65;">
                       ${copy.description}
                     </p>
 
-                    <!-- OTP Surface -->
-                    <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" style="background-color: #FAFAFA; border: 1px solid #E4E4E7; border-radius: 12px; margin-bottom: 22px;">
+                    <!-- OTP Frosted Glass Surface -->
+                    <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" style="background-color: rgba(10, 10, 14, 0.58); border: 1px solid rgba(255, 255, 255, 0.2); border-radius: 16px; margin-bottom: 22px; backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px);">
                       <tr>
-                        <td align="center" style="padding: 24px 20px 22px;">
-                          <div style="font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace; font-size: 10px; font-weight: 600; letter-spacing: 0.16em; color: #71717A; text-transform: uppercase; margin-bottom: 12px;">
+                        <td align="center" style="padding: 24px 18px 22px;">
+                          <div style="font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace; font-size: 10px; font-weight: 600; letter-spacing: 0.16em; color: #A1A1AA; text-transform: uppercase; margin-bottom: 12px;">
                             Kode Verifikasi Sekali Pakai
                           </div>
-                          <div class="otp-code-text" style="font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace; font-size: 36px; font-weight: 700; letter-spacing: 0.28em; text-indent: 0.28em; color: #0A0A0A; line-height: 1.2; padding: 4px 0 16px;">
+                          <div class="otp-code-text" style="font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace; font-size: 36px; font-weight: 700; letter-spacing: 0.28em; text-indent: 0.28em; color: #FFFFFF; line-height: 1.2; padding: 4px 0 16px;">
                             ${safeOtp}
                           </div>
                           <table role="presentation" border="0" cellpadding="0" cellspacing="0" style="margin: 0 auto 14px;">
@@ -290,33 +300,29 @@ const sendOTPEmail = async (toEmail, otpCode, recipientName = 'Pengguna', purpos
                               </td>
                             </tr>
                           </table>
-                          <div style="font-size: 12px; color: #71717A; line-height: 1.5;">
-                            Berlaku selama <strong style="color: #18181B; font-weight: 600;">5 menit</strong> &middot; Jangan bagikan kode ini kepada siapa pun
+                          <div style="font-size: 12px; color: #A1A1AA; line-height: 1.55;">
+                            Berlaku selama <strong style="color: #F4F4F5; font-weight: 600;">5 menit</strong> &middot; Jangan bagikan kode ini kepada siapa pun
                           </div>
                         </td>
                       </tr>
                     </table>
 
                     <!-- Quiet Security Note -->
-                    <p style="margin: 0; font-size: 12.5px; color: #71717A; line-height: 1.6;">
-                      Tim DinoyoCraft tidak pernah meminta kode verifikasi Anda melalui telepon, pesan instan, atau email. Jika Anda tidak melakukan permintaan ini, abaikan email ini dengan aman.
+                    <p style="margin: 0; text-align: center; font-size: 12px; color: #A1A1AA; line-height: 1.6;">
+                      Tim DinoyoCraft tidak pernah meminta kode verifikasi Anda. Jika Anda tidak melakukan permintaan ini, abaikan email ini dengan aman.
                     </p>
                   </td>
                 </tr>
 
-                <!-- Minimal Footer -->
+                <!-- Minimal Frosted Footer -->
                 <tr>
-                  <td style="padding: 20px 32px 24px; border-top: 1px solid #F0F0F2; background-color: #FAFAFA;">
-                    <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%">
-                      <tr>
-                        <td style="font-size: 11.5px; color: #71717A; line-height: 1.6;">
-                          <strong style="color: #18181B; font-weight: 600;">DinoyoCraft</strong> &mdash; Sentra Kerajinan Keramik Dinoyo, Malang<br/>
-                          <a href="https://dinoyocraft.my.id" style="color: #52525B; text-decoration: none;">dinoyocraft.my.id</a>
-                          &nbsp;&middot;&nbsp;
-                          &copy; ${new Date().getFullYear()} DinoyoCraft
-                        </td>
-                      </tr>
-                    </table>
+                  <td align="center" style="padding: 18px 28px 22px; background-color: rgba(8, 8, 11, 0.62); border-top: 1px solid rgba(255, 255, 255, 0.1); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);">
+                    <div style="font-size: 11.5px; color: #A1A1AA; line-height: 1.65;">
+                      <strong style="color: #F4F4F5; font-weight: 600;">DinoyoCraft</strong> &mdash; Sentra Kerajinan Keramik Dinoyo, Malang<br/>
+                      <a href="https://dinoyocraft.my.id" style="color: #D4D4D8; text-decoration: none;">dinoyocraft.my.id</a>
+                      &nbsp;&middot;&nbsp;
+                      &copy; ${new Date().getFullYear()} DinoyoCraft
+                    </div>
                   </td>
                 </tr>
 
