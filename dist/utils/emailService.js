@@ -1,17 +1,57 @@
 "use strict";
 // ============================================================
 //  src/utils/emailService.ts
-//  Nodemailer Email Service — Kirim OTP via Gmail SMTP
+//  Email Service — Mendukung Resend (API & SMTP) + Gmail SMTP
 // ============================================================
 var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.sendOTPEmail = exports.getTransporter = void 0;
+exports.sendOTPEmail = exports.sendEmail = exports.getTransporter = exports.isEmailConfigured = exports.getDefaultFromAddress = exports.getResendApiKey = void 0;
 require("dotenv/config");
 const nodemailer_1 = __importDefault(require("nodemailer"));
+const RESEND_API_ENDPOINT = 'https://api.resend.com/emails';
 /**
- * Membuat transporter Gmail SMTP secara dinamis dari environment variables
+ * Mengambil Resend API Key jika dikonfigurasi di environment variables.
+ */
+const getResendApiKey = () => {
+    const key = (process.env['RESEND_API_KEY'] || '').trim();
+    if (!key || key.includes('your_resend_api_key'))
+        return '';
+    return key;
+};
+exports.getResendApiKey = getResendApiKey;
+/**
+ * Menentukan alamat pengirim (From) yang valid untuk Resend maupun SMTP.
+ * Prioritas: EMAIL_FROM -> default domain dinoyocraft.my.id (jika pakai Resend) -> EMAIL_USER.
+ */
+const getDefaultFromAddress = () => {
+    const explicitFrom = (process.env['EMAIL_FROM'] || '').trim();
+    if (explicitFrom) {
+        return explicitFrom.includes('<') ? explicitFrom : `DinoyoCraft <${explicitFrom}>`;
+    }
+    const smtpHost = (process.env['SMTP_HOST'] || '').trim().toLowerCase();
+    if ((0, exports.getResendApiKey)() || smtpHost.includes('resend')) {
+        return 'DinoyoCraft <noreply@dinoyocraft.my.id>';
+    }
+    const emailUser = (process.env['EMAIL_USER'] || 'csdinoyocraft@gmail.com').trim();
+    return `"DinoyoCraft Portal" <${emailUser}>`;
+};
+exports.getDefaultFromAddress = getDefaultFromAddress;
+/**
+ * Mengecek apakah layanan email (Resend API atau SMTP) sudah dikonfigurasi.
+ */
+const isEmailConfigured = () => {
+    if ((0, exports.getResendApiKey)())
+        return true;
+    const user = (process.env['EMAIL_USER'] || '').trim();
+    const pass = (process.env['EMAIL_PASS'] || '').trim();
+    return Boolean(user && pass && pass !== 'xxxx xxxx xxxx xxxx');
+};
+exports.isEmailConfigured = isEmailConfigured;
+/**
+ * Membuat transporter SMTP secara dinamis dari environment variables.
+ * Kompatibel dengan Resend SMTP (smtp.resend.com:587) maupun Gmail SMTP (smtp.gmail.com:587).
  */
 const getTransporter = () => {
     const user = (process.env['EMAIL_USER'] || '').trim();
@@ -38,6 +78,55 @@ const getTransporter = () => {
     });
 };
 exports.getTransporter = getTransporter;
+/**
+ * Mengirim email melalui Resend HTTPS API (prioritas bila RESEND_API_KEY diisi)
+ * atau fallback otomatis ke SMTP Nodemailer (Resend SMTP / Gmail SMTP).
+ */
+const sendEmail = async (payload) => {
+    const from = (payload.from || '').trim() || (0, exports.getDefaultFromAddress)();
+    const replyTo = (payload.replyTo || process.env['EMAIL_REPLY_TO'] || '').trim() || undefined;
+    const resendKey = (0, exports.getResendApiKey)();
+    if (resendKey) {
+        const body = {
+            from,
+            to: Array.isArray(payload.to) ? payload.to : [payload.to],
+            subject: payload.subject,
+            html: payload.html,
+        };
+        if (replyTo) {
+            body['reply_to'] = replyTo;
+        }
+        const res = await fetch(RESEND_API_ENDPOINT, {
+            method: 'POST',
+            headers: {
+                Authorization: `Bearer ${resendKey}`,
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(body),
+        });
+        if (!res.ok) {
+            let detail = `HTTP ${res.status}`;
+            try {
+                const errJson = (await res.json());
+                detail = errJson.message || errJson.name || detail;
+            }
+            catch {
+                // ignore JSON parse error
+            }
+            throw new Error(`Resend API error: ${detail}`);
+        }
+        return;
+    }
+    const transporter = (0, exports.getTransporter)();
+    await transporter.sendMail({
+        from,
+        to: payload.to,
+        subject: payload.subject,
+        html: payload.html,
+        ...(replyTo ? { replyTo } : {}),
+    });
+};
+exports.sendEmail = sendEmail;
 const PURPOSE_COPY = {
     register: {
         subject: 'Kode OTP Verifikasi Pendaftaran - DinoyoCraft',
@@ -72,7 +161,7 @@ const sendOTPEmail = async (toEmail, otpCode, recipientName = 'Pengguna', purpos
     const logoUrl = 'https://raw.githubusercontent.com/alifarda126/DinoyoCraftApp/main/assets/images/branding/Logo.png';
     const copy = PURPOSE_COPY[purpose] || PURPOSE_COPY.register;
     const mailOptions = {
-        from: `"DinoyoCraft Portal" <${process.env['EMAIL_USER'] || 'csdinoyocraft@gmail.com'}>`,
+        from: (0, exports.getDefaultFromAddress)(),
         to: toEmail,
         subject: copy.subject,
         html: `
@@ -181,9 +270,9 @@ const sendOTPEmail = async (toEmail, otpCode, recipientName = 'Pengguna', purpos
     `,
     };
     try {
-        const transporter = (0, exports.getTransporter)();
-        await transporter.sendMail(mailOptions);
-        console.log(`✅ [EMAIL SUCCESS] Kode OTP berhasil dikirim ke: ${toEmail}`);
+        await (0, exports.sendEmail)(mailOptions);
+        const provider = (0, exports.getResendApiKey)() ? 'Resend API' : (process.env['SMTP_HOST'] || 'SMTP');
+        console.log(`✅ [EMAIL SUCCESS] Kode OTP berhasil dikirim ke: ${toEmail} via ${provider}`);
     }
     catch (error) {
         console.error(`❌ [EMAIL ERROR] Gagal mengirim email OTP ke ${toEmail}:`, error.message);

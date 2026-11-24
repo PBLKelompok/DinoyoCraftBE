@@ -1234,7 +1234,7 @@ const forgotPassword = async (req, res) => {
         // 5. Kirim OTP via Email dengan Template Branded DinoyoCraft & Logo Project
         const logoUrl = 'https://raw.githubusercontent.com/alifarda126/DinoyoCraftApp/main/assets/images/branding/Logo.png';
         const mailOptions = {
-            from: `"DinoyoCraft Portal" <${process.env['EMAIL_USER'] || 'csdinoyocraft@gmail.com'}>`,
+            from: (0, emailService_js_1.getDefaultFromAddress)(),
             to: cleanEmail,
             subject: 'Kode OTP Verifikasi Lupa Kata Sandi - DinoyoCraft',
             html: `
@@ -1354,19 +1354,18 @@ const forgotPassword = async (req, res) => {
         </html>
       `,
         };
-        // Kirim jika konfigurasi email terisi
-        if (process.env['EMAIL_USER'] && process.env['EMAIL_PASS'] && process.env['EMAIL_PASS'] !== 'xxxx xxxx xxxx xxxx') {
+        // Kirim jika konfigurasi email (Resend API atau SMTP) terisi
+        if ((0, emailService_js_1.isEmailConfigured)()) {
             try {
-                const mailTransporter = (0, emailService_js_1.getTransporter)();
-                await mailTransporter.sendMail(mailOptions);
-                console.log(`Ã¢Å“â€¦ [OTP] Email OTP berhasil dikirim ke ${email}`);
+                await (0, emailService_js_1.sendEmail)(mailOptions);
+                console.log(`✅ [OTP] Email OTP berhasil dikirim ke ${cleanEmail}`);
             }
             catch (mailError) {
-                console.error('Ã¢Å¡Â Ã¯Â¸Â [OTP] Gagal mengirim email via Nodemailer:', mailError);
+                console.error('⚠️ [OTP] Gagal mengirim email OTP:', mailError);
             }
         }
         else {
-            console.log('Ã¢Å¡Â Ã¯Â¸Â [OTP] EMAIL_USER/EMAIL_PASS belum dikonfigurasi. Gunakan kode OTP dari log terminal di atas.');
+            console.log('⚠️ [OTP] Layanan email (RESEND_API_KEY / SMTP) belum dikonfigurasi.');
         }
         res.status(200).json({
             success: true,
