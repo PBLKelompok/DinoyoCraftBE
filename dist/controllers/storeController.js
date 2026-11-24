@@ -36,14 +36,15 @@ const getStoreProfile = async (req, res) => {
             return;
         }
         const store = storeRows[0];
+        const requestOrigin = `${req.protocol}://${req.get('host') || 'localhost:5000'}`;
         // Format avatar_url & banner_url jika relative path
         let avatarUrl = store.avatar_url || null;
         if (avatarUrl && !avatarUrl.startsWith('http')) {
-            avatarUrl = `http://localhost:5000${avatarUrl.startsWith('/') ? '' : '/'}${avatarUrl}`;
+            avatarUrl = `${requestOrigin}${avatarUrl.startsWith('/') ? '' : '/'}${avatarUrl}`;
         }
         let bannerUrl = store.banner_url || null;
         if (bannerUrl && !bannerUrl.startsWith('http')) {
-            bannerUrl = `http://localhost:5000${bannerUrl.startsWith('/') ? '' : '/'}${bannerUrl}`;
+            bannerUrl = `${requestOrigin}${bannerUrl.startsWith('/') ? '' : '/'}${bannerUrl}`;
         }
         // 2. Ambil semua produk milik toko ini
         const [productRows] = await database_js_1.default.query(`SELECT 
@@ -65,7 +66,7 @@ const getStoreProfile = async (req, res) => {
             const imageUrls = (0, productController_js_1.parseImageUrls)(p.image_urls);
             let imageUrl = imageUrls.length > 0 ? imageUrls[0] : null;
             if (imageUrl && !imageUrl.startsWith('http')) {
-                imageUrl = `http://localhost:5000${imageUrl.startsWith('/') ? '' : '/'}${imageUrl}`;
+                imageUrl = `${requestOrigin}${imageUrl.startsWith('/') ? '' : '/'}${imageUrl}`;
             }
             const totalReviews = Number(p.total_reviews) || 0;
             const rating = totalReviews > 0 ? Number(p.rating) || 0 : 0;

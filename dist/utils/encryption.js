@@ -6,12 +6,15 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.decryptMessage = exports.encryptMessage = void 0;
 const crypto_1 = __importDefault(require("crypto"));
 const ALGORITHM = 'aes-256-cbc';
-// Kunci ini harus tepat 32 karakter. Sebaiknya taruh di file .env nanti
-const SECRET_KEY = process.env.ENCRYPTION_KEY || 'dinoyocraft_secret_key_32_chars!';
+// Pastikan panjang kunci selalu 32 byte untuk AES-256-CBC tanpa mematahkan kunci 32-byte eksisting
+const RAW_SECRET_KEY = process.env.ENCRYPTION_KEY || 'dinoyocraft_secret_key_32_chars!';
+const KEY_BUFFER = Buffer.byteLength(RAW_SECRET_KEY, 'utf8') === 32
+    ? Buffer.from(RAW_SECRET_KEY, 'utf8')
+    : crypto_1.default.createHash('sha256').update(RAW_SECRET_KEY, 'utf8').digest();
 const IV_LENGTH = 16;
 const encryptMessage = (text) => {
     const iv = crypto_1.default.randomBytes(IV_LENGTH);
-    const cipher = crypto_1.default.createCipheriv(ALGORITHM, Buffer.from(SECRET_KEY), iv);
+    const cipher = crypto_1.default.createCipheriv(ALGORITHM, KEY_BUFFER, iv);
     let encrypted = cipher.update(text);
     encrypted = Buffer.concat([encrypted, cipher.final()]);
     return iv.toString('hex') + ':' + encrypted.toString('hex');
@@ -25,7 +28,7 @@ const decryptMessage = (text) => {
             return text;
         const iv = Buffer.from(textParts.shift(), 'hex');
         const encryptedText = Buffer.from(textParts.join(':'), 'hex');
-        const decipher = crypto_1.default.createDecipheriv(ALGORITHM, Buffer.from(SECRET_KEY), iv);
+        const decipher = crypto_1.default.createDecipheriv(ALGORITHM, KEY_BUFFER, iv);
         let decrypted = decipher.update(encryptedText);
         decrypted = Buffer.concat([decrypted, decipher.final()]);
         return decrypted.toString();

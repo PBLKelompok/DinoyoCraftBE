@@ -22,18 +22,26 @@ async function settleOrderPaid(trx) {
     const connection = await database_js_1.default.getConnection();
     try {
         await connection.beginTransaction();
-        // Idempotency guard — cek ulang di dalam lock transaksi.
+        // Idempotency guard — cek ulang transaksi & order di dalam lock transaksi.
         const [current] = await connection.query('SELECT status FROM transactions WHERE id = ? FOR UPDATE', [trx.id]);
-        if (!current || current.length === 0 || current[0].status === 'success') {
+        const [orderRows] = await connection.query('SELECT status FROM orders WHERE id = ? FOR UPDATE', [trx.order_id]);
+        if (!current ||
+            current.length === 0 ||
+            current[0].status !== 'pending' ||
+            !orderRows ||
+            orderRows.length === 0 ||
+            orderRows[0].status === 'cancelled') {
             await connection.rollback();
             return false;
         }
         await connection.query("UPDATE transactions SET status = 'success', paid_at = COALESCE(paid_at, NOW()) WHERE id = ?", [trx.id]);
-        await connection.query("UPDATE orders SET status = 'paid' WHERE id = ?", [
-            trx.order_id,
-        ]);
-        // Timeline tracking: pembayaran terverifikasi
-        await connection.query('INSERT INTO order_status_history (order_id, status, note) VALUES (?, ?, ?)', [trx.order_id, 'paid', 'Pembayaran terverifikasi']);
+        if (orderRows[0].status === 'pending') {
+            await connection.query("UPDATE orders SET status = 'paid' WHERE id = ?", [
+                trx.order_id,
+            ]);
+            // Timeline tracking: pembayaran terverifikasi
+            await connection.query('INSERT INTO order_status_history (order_id, status, note) VALUES (?, ?, ?)', [trx.order_id, 'paid', 'Pembayaran terverifikasi']);
+        }
         const nominal = Number(trx.total_amount || 0).toLocaleString('id-ID');
         await connection.query(`INSERT INTO notifications (user_id, title, message, type, reference_id)
        VALUES (?, ?, ?, 'order', ?)`, [

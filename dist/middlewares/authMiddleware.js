@@ -7,7 +7,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.getAuthLocals = exports.isAdmin = exports.requireRole = exports.verifyToken = void 0;
+exports.getAuthLocals = exports.isAdmin = exports.requireRole = exports.optionalVerifyToken = exports.verifyToken = void 0;
 const jsonwebtoken_1 = __importDefault(require("jsonwebtoken"));
 const response_js_1 = require("../utils/response.js");
 const database_1 = __importDefault(require("../config/database"));
@@ -80,6 +80,50 @@ const verifyToken = async (req, res, next) => {
     }
 };
 exports.verifyToken = verifyToken;
+/**
+ * optionalVerifyToken
+ * Mengekstrak identitas user bila header Authorization / cookie JWT valid,
+ * namun tetap melanjutkan request (next) bila tidak ada token (untuk endpoint hybrid/publik).
+ */
+const optionalVerifyToken = async (req, res, next) => {
+    let token;
+    const authHeader = req.headers['authorization'];
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+        token = authHeader.split(' ')[1];
+    }
+    else if (req.headers.cookie) {
+        const cookies = req.headers.cookie.split(';');
+        for (const cookie of cookies) {
+            const parts = cookie.trim().split('=');
+            const name = parts[0];
+            const val = parts.slice(1).join('=');
+            if (name === 'token' || name === 'jwt' || name === 'accessToken') {
+                token = decodeURIComponent(val);
+                break;
+            }
+        }
+    }
+    if (!token) {
+        next();
+        return;
+    }
+    try {
+        const decoded = jsonwebtoken_1.default.verify(token, JWT_SECRET);
+        const [rows] = (await database_1.default.query('SELECT token_version, is_active FROM users WHERE id = ? LIMIT 1', [decoded.userId]));
+        const dbUser = rows?.[0];
+        if (dbUser && dbUser.is_active !== 0 && (decoded.ver ?? 0) === dbUser.token_version) {
+            res.locals['userId'] = decoded.userId;
+            res.locals['email'] = decoded.email;
+            res.locals['role'] = decoded.role;
+            req.user = { id: decoded.userId, ...decoded };
+        }
+    }
+    catch {
+        // Abaikan token tidak valid pada mode opsional
+    }
+    next();
+};
+exports.optionalVerifyToken = optionalVerifyToken;
 /**
  * requireRole
  * Middleware untuk membatasi akses berdasarkan peran (RBAC).

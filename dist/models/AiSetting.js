@@ -9,9 +9,10 @@ class AiSetting extends sequelize_1.Model {
 }
 AiSetting.init({
     id: { type: sequelize_1.DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
-    is_auto_reply_active: { type: sequelize_1.DataTypes.BOOLEAN, defaultValue: false },
-    model_name: { type: sequelize_1.DataTypes.STRING, defaultValue: 'gemini-1.5-pro' }, // Sesuai dropdown UI Admin
-    api_key: { type: sequelize_1.DataTypes.STRING, allowNull: true },
+    is_auto_reply_active: { type: sequelize_1.DataTypes.BOOLEAN, defaultValue: true },
+    provider: { type: sequelize_1.DataTypes.STRING(50), allowNull: true },
+    model_name: { type: sequelize_1.DataTypes.STRING(255), defaultValue: 'gemini-3.5-flash-lite' },
+    api_key: { type: sequelize_1.DataTypes.TEXT, allowNull: true },
     system_prompt: { type: sequelize_1.DataTypes.TEXT, allowNull: true }
 }, {
     sequelize: database_js_1.default,

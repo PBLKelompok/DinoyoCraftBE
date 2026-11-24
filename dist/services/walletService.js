@@ -27,18 +27,15 @@ const minWithdrawal = () => Number(process.env['MIN_WITHDRAWAL'] || 50_000);
 exports.minWithdrawal = minWithdrawal;
 const withdrawalFee = () => Number(process.env['WITHDRAWAL_FEE'] || 0);
 exports.withdrawalFee = withdrawalFee;
-async function getMitraProfile(userId) {
-    const [rows] = await database_js_1.default.query('SELECT id, user_id, store_name FROM mitra_profiles WHERE user_id = ? LIMIT 1', [userId]);
-    return rows && rows.length > 0 ? rows[0] : null;
-}
+const formatWibYmd = (date) => new Date(date.getTime() + 7 * 60 * 60 * 1000).toISOString().split('T')[0];
 /** Ringkasan saldo mitra berdasarkan pesanan selesai & riwayat penarikan. */
-async function getWalletSummary(mitraId) {
-    const [earnRows] = await database_js_1.default.query(`SELECT
+async function getWalletSummary(mitraId, conn = database_js_1.default) {
+    const [earnRows] = await conn.query(`SELECT
        COALESCE(SUM(CASE WHEN LOWER(status) IN (${COMPLETED_STATUSES.map(() => '?').join(',')}) THEN total_amount ELSE 0 END), 0) AS completed_total,
        COALESCE(SUM(CASE WHEN LOWER(status) IN (${PENDING_EARN_STATUSES.map(() => '?').join(',')}) THEN total_amount ELSE 0 END), 0) AS pending_total
      FROM orders
      WHERE mitra_id = ? AND status != 'cancelled'`, [...COMPLETED_STATUSES, ...PENDING_EARN_STATUSES, mitraId]);
-    const [withdrawRows] = await database_js_1.default.query(`SELECT
+    const [withdrawRows] = await conn.query(`SELECT
        COALESCE(SUM(CASE WHEN status IN ('pending','approved') THEN amount ELSE 0 END), 0) AS locked_total,
        COALESCE(SUM(CASE WHEN status = 'approved' THEN amount ELSE 0 END), 0) AS withdrawn_total
      FROM withdrawal_requests
@@ -68,13 +65,13 @@ async function getWeeklyChart(mitraId) {
        COALESCE(SUM(total_amount), 0) AS total_amount
      FROM orders
      WHERE mitra_id = ? 
-       AND status != 'cancelled'
+       AND status NOT IN ('cancelled', 'pending')
        AND created_at >= DATE_SUB(CURDATE(), INTERVAL 6 DAY)
      GROUP BY DATE(created_at), DATE_FORMAT(created_at, '%Y-%m-%d'), DAYNAME(created_at)
      ORDER BY DATE(created_at) ASC`, [mitraId]);
     const rawMap = new Map();
     for (const r of rows) {
-        const key = r.tanggal_str || (r.tanggal instanceof Date ? r.tanggal.toISOString().split('T')[0] : String(r.tanggal));
+        const key = r.tanggal_str || (r.tanggal instanceof Date ? formatWibYmd(r.tanggal) : String(r.tanggal));
         rawMap.set(key, Number(r.total_amount) || 0);
     }
     const DAY_LABELS_ID = {
@@ -91,7 +88,7 @@ async function getWeeklyChart(mitraId) {
     for (let i = 6; i >= 0; i--) {
         const d = new Date();
         d.setDate(d.getDate() - i);
-        const dateStr = d.toISOString().split('T')[0];
+        const dateStr = formatWibYmd(d);
         const dayNameEn = d.toLocaleDateString('en-US', { weekday: 'long' });
         const dayNameId = DAY_LABELS_ID[dayNameEn] || dayNameEn;
         const amount = Number(rawMap.get(dateStr) || 0);
@@ -122,13 +119,13 @@ async function getMonthlyChart(mitraId) {
        COALESCE(SUM(total_amount), 0) AS total_amount
      FROM orders
      WHERE mitra_id = ? 
-       AND status != 'cancelled'
+       AND status NOT IN ('cancelled', 'pending')
        AND created_at >= DATE_SUB(CURDATE(), INTERVAL 29 DAY)
      GROUP BY DATE(created_at), DATE_FORMAT(created_at, '%Y-%m-%d'), DAY(created_at)
      ORDER BY DATE(created_at) ASC`, [mitraId]);
     const rawMap = new Map();
     for (const r of rows) {
-        const key = r.tanggal_str || (r.tanggal instanceof Date ? r.tanggal.toISOString().split('T')[0] : String(r.tanggal));
+        const key = r.tanggal_str || (r.tanggal instanceof Date ? formatWibYmd(r.tanggal) : String(r.tanggal));
         rawMap.set(key, Number(r.total_amount) || 0);
     }
     // Susun 30 hari berturut-turut sampai hari ini
@@ -136,7 +133,7 @@ async function getMonthlyChart(mitraId) {
     for (let i = 29; i >= 0; i--) {
         const d = new Date();
         d.setDate(d.getDate() - i);
-        const dateStr = d.toISOString().split('T')[0];
+        const dateStr = formatWibYmd(d);
         const dayNumber = d.getDate();
         const amount = Number(rawMap.get(dateStr) || 0);
         monthlyDays.push({
@@ -179,10 +176,6 @@ async function listWithdrawals(mitraId, limit = 20) {
 }
 /** Ajukan penarikan saldo. Melempar Error dengan pesan Indonesia bila tidak valid. */
 async function requestWithdrawal(userId, params) {
-    const mitra = await getMitraProfile(userId);
-    if (!mitra) {
-        throw Object.assign(new Error('Profil mitra tidak ditemukan.'), { status: 404 });
-    }
     const amount = Math.round(Number(params.amount || 0));
     if (!amount || amount <= 0) {
         throw Object.assign(new Error('Nominal penarikan tidak valid.'), { status: 400 });
@@ -190,10 +183,6 @@ async function requestWithdrawal(userId, params) {
     const min = (0, exports.minWithdrawal)();
     if (amount < min) {
         throw Object.assign(new Error(`Minimal penarikan adalah Rp ${min.toLocaleString('id-ID')}.`), { status: 400 });
-    }
-    const summary = await getWalletSummary(mitra.id);
-    if (amount > summary.saldo_tersedia) {
-        throw Object.assign(new Error(`Saldo tidak cukup. Saldo tersedia: Rp ${summary.saldo_tersedia.toLocaleString('id-ID')}.`), { status: 400 });
     }
     if (!params.bank_name?.trim() || !params.account_number?.trim() || !params.account_name?.trim()) {
         throw Object.assign(new Error('Nama bank, nomor rekening, dan nama pemilik rekening wajib diisi.'), { status: 400 });
@@ -203,6 +192,15 @@ async function requestWithdrawal(userId, params) {
     let insertId;
     try {
         await connection.beginTransaction();
+        const [mitraRows] = await connection.query('SELECT id, user_id, store_name FROM mitra_profiles WHERE user_id = ? LIMIT 1 FOR UPDATE', [userId]);
+        const mitra = mitraRows && mitraRows.length > 0 ? mitraRows[0] : null;
+        if (!mitra) {
+            throw Object.assign(new Error('Profil mitra tidak ditemukan.'), { status: 404 });
+        }
+        const summary = await getWalletSummary(mitra.id, connection);
+        if (amount > summary.saldo_tersedia) {
+            throw Object.assign(new Error(`Saldo tidak cukup. Saldo tersedia: Rp ${summary.saldo_tersedia.toLocaleString('id-ID')}.`), { status: 400 });
+        }
         const [result] = await connection.query(`INSERT INTO withdrawal_requests
          (user_id, mitra_id, amount, fee, bank_name, account_number, account_name, status, processed_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, 'approved', NOW())`, [

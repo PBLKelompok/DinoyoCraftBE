@@ -3,7 +3,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.apiLimiter = void 0;
+exports.otpVerifyRateLimiter = exports.otpSendRateLimiter = exports.loginRateLimiter = exports.apiLimiter = void 0;
 require("dotenv/config");
 // ============================================================
 //  src/app.ts
@@ -12,15 +12,16 @@ require("dotenv/config");
 const express_1 = __importDefault(require("express"));
 const cors_1 = __importDefault(require("cors"));
 const helmet_1 = __importDefault(require("helmet"));
-const express_rate_limit_1 = __importDefault(require("express-rate-limit"));
 const dotenv_1 = __importDefault(require("dotenv"));
 const index_js_1 = __importDefault(require("./routes/index.js"));
 const errorMiddleware_js_1 = require("./middlewares/errorMiddleware.js");
 const auditMiddleware_js_1 = require("./middlewares/auditMiddleware.js");
 const path_1 = __importDefault(require("path"));
+const fs_1 = __importDefault(require("fs"));
 // Load environment variables SEBELUM apapun
 dotenv_1.default.config();
 const app = (0, express_1.default)();
+app.set('trust proxy', 1);
 // -------------------------------------------------------
 // 1. CORS — Konfigurasi origin ramah Mobile & Web
 // Tambahkan ini agar aplikasi web (Chrome) diizinkan mengakses API
@@ -40,19 +41,14 @@ app.use((0, helmet_1.default)({
     hsts: isProd ? undefined : false,
     contentSecurityPolicy: isProd ? undefined : false,
 }));
-exports.apiLimiter = (0, express_rate_limit_1.default)({
-    windowMs: 15 * 60 * 1000,
-    limit: 500,
-    standardHeaders: 'draft-8',
-    legacyHeaders: false,
-    // Kecualikan webhook Midtrans agar callback server-to-server tidak pernah kena rate limit (PRD §5.4)
-    skip: (req) => req.path === '/payments/webhook' || req.originalUrl.startsWith('/api/payments/webhook'),
-    message: {
-        success: false,
-        message: 'Terlalu banyak permintaan dari IP ini, silakan coba lagi setelah 15 menit.',
-    },
-});
-app.use('/api', exports.apiLimiter);
+// Rate limiter TIDAK dipasang global di /api agar auto-fetch / polling data
+// (dashboard, chat, pesanan, dll.) tidak pernah terkena HTTP 429.
+// Limiter hanya dipasang pada endpoint Login & OTP di src/routes/authRoutes.ts.
+var rateLimitMiddleware_js_1 = require("./middlewares/rateLimitMiddleware.js");
+Object.defineProperty(exports, "apiLimiter", { enumerable: true, get: function () { return rateLimitMiddleware_js_1.apiLimiter; } });
+Object.defineProperty(exports, "loginRateLimiter", { enumerable: true, get: function () { return rateLimitMiddleware_js_1.loginRateLimiter; } });
+Object.defineProperty(exports, "otpSendRateLimiter", { enumerable: true, get: function () { return rateLimitMiddleware_js_1.otpSendRateLimiter; } });
+Object.defineProperty(exports, "otpVerifyRateLimiter", { enumerable: true, get: function () { return rateLimitMiddleware_js_1.otpVerifyRateLimiter; } });
 // -------------------------------------------------------
 // 3. Body Parsing
 // -------------------------------------------------------
@@ -90,6 +86,29 @@ app.use('/uploads', express_1.default.static(targetFolder));
 app.use('/api/uploads', express_1.default.static(targetFolder));
 app.use('/assets/stickers', express_1.default.static(path_1.default.join(targetFolder, 'stickers')));
 app.use('/stickers', express_1.default.static(path_1.default.join(targetFolder, 'stickers')));
+// Abaikan request favicon browser agar tidak tercatat sebagai 404 warning
+app.get('/favicon.ico', (_req, res) => {
+    res.status(204).end();
+});
+// Fallback gambar bila file lama di tabel seed sudah tidak ada di folder uploads
+const PLACEHOLDER_PNG_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
+app.use(['/uploads', '/api/uploads'], (req, res, next) => {
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+        next();
+        return;
+    }
+    if (!/\.(png|jpe?g|webp|gif|svg)$/i.test(req.path)) {
+        next();
+        return;
+    }
+    const fallbackImg = path_1.default.join(targetFolder, 'stickers', 'sticker_clay_crafting.jpg');
+    res.setHeader('Cache-Control', 'public, max-age=3600');
+    if (fs_1.default.existsSync(fallbackImg)) {
+        res.sendFile(fallbackImg);
+        return;
+    }
+    res.type('image/png').status(200).send(Buffer.from(PLACEHOLDER_PNG_BASE64, 'base64'));
+});
 // -------------------------------------------------------
 // 7. Router Utama
 // -------------------------------------------------------

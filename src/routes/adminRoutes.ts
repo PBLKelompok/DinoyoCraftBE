@@ -6,7 +6,7 @@
 import { Router } from 'express';
 import * as adminController from '../controllers/adminController.js';
 import * as systemLogController from '../controllers/systemLogController.js';
-import { getAiSettings, updateAiSettings } from '../controllers/aiSettingController.js';
+import { getAiSettings, updateAiSettings, verifyAiApiKey } from '../controllers/aiSettingController.js';
 import { verifyToken, requireRole } from '../middlewares/authMiddleware.js';
 import { validateZod } from '../middlewares/validatorMiddleware.js';
 import {
@@ -33,6 +33,13 @@ router.get('/dashboard-stats', adminController.getDashboardStats);
  * @access  Admin only
  */
 router.get('/ai-settings', getAiSettings);
+
+/**
+ * @route   POST /api/admin/ai-settings/verify
+ * @desc    Menguji validitas API Key & mendeteksi daftar model yang tersedia
+ * @access  Admin only
+ */
+router.post('/ai-settings/verify', verifyAiApiKey);
 
 /**
  * @route   PUT /api/admin/ai-settings

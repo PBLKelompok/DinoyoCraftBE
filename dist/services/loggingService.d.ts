@@ -1,5 +1,4 @@
 import { Request, Response } from 'express';
-import Pusher from 'pusher';
 export type LogSeverity = 'debug' | 'info' | 'success' | 'warning' | 'error' | 'critical';
 export type LogOutcome = 'success' | 'failure' | 'pending' | 'info';
 export type LogSource = 'backend' | 'web' | 'mobile' | 'worker' | 'external';
@@ -45,7 +44,11 @@ export interface SystemLogEventInput {
     metadata?: Record<string, unknown> | null;
     skipPusher?: boolean;
 }
-export declare const getPusherClient: () => Pusher | null;
+export declare const getPusherClient: () => {
+    trigger(channels: string | string[], event: string, data: any, params?: import("pusher").TriggerParams): Promise<import("node-fetch").Response | undefined>;
+    authorizeChannel(socketId: string, channel: string, data?: import("pusher").PresenceChannelData): import("pusher").ChannelAuthResponse;
+    authenticateUser(socketId: string, userData: import("pusher").UserChannelData): import("pusher").UserAuthResponse;
+} | null;
 export declare const generateEventId: () => string;
 export declare const generateRequestId: () => string;
 export declare const maskEmail: (email?: string | null) => string;

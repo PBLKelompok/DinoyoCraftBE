@@ -603,6 +603,12 @@ export const updateOrderStatus = async (req: Request, res: Response): Promise<vo
       return;
     }
 
+    if (status === 'paid' && role !== 'admin') {
+      await connection.rollback();
+      sendForbidden(res, 'Status "paid" hanya dapat dikonfirmasi otomatis melalui pembayaran Midtrans atau Admin.');
+      return;
+    }
+
     if (order.status === 'pending' && ['packed', 'shipped', 'completed'].includes(status)) {
       await connection.rollback();
       sendBadRequest(res, 'Pesanan belum dibayar sehingga belum dapat dikemas, dikirim, atau diselesaikan.');

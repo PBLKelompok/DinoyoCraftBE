@@ -45,26 +45,32 @@ const authMiddleware_js_1 = require("../middlewares/authMiddleware.js");
 const validatorMiddleware_js_1 = require("../middlewares/validatorMiddleware.js");
 const schemas_js_1 = require("../validators/schemas.js");
 const router = (0, express_1.Router)();
+// Seluruh endpoint admin memerlukan autentikasi + role admin
+router.use(authMiddleware_js_1.verifyToken, (0, authMiddleware_js_1.requireRole)(['admin']));
 /**
  * @route   GET /api/admin/dashboard-stats
  * @desc    Mendapatkan ringkasan statistik dan aktivitas dashboard admin
- * @access  Admin (atau public untuk dev/test)
+ * @access  Admin only
  */
 router.get('/dashboard-stats', adminController.getDashboardStats);
 /**
  * @route   GET /api/admin/ai-settings
  * @desc    Mendapatkan konfigurasi AI Assistant
- * @access  Admin
+ * @access  Admin only
  */
 router.get('/ai-settings', aiSettingController_js_1.getAiSettings);
 /**
+ * @route   POST /api/admin/ai-settings/verify
+ * @desc    Menguji validitas API Key & mendeteksi daftar model yang tersedia
+ * @access  Admin only
+ */
+router.post('/ai-settings/verify', aiSettingController_js_1.verifyAiApiKey);
+/**
  * @route   PUT /api/admin/ai-settings
  * @desc    Menyimpan / memperbarui konfigurasi AI Assistant
- * @access  Admin
+ * @access  Admin only
  */
 router.put('/ai-settings', aiSettingController_js_1.updateAiSettings);
-// Semua route di bawah ini memerlukan autentikasi + role admin
-router.use(authMiddleware_js_1.verifyToken, (0, authMiddleware_js_1.requireRole)(['admin']));
 /**
  * @route   GET /api/admin/users
  * @desc    Mendapatkan semua pengguna (dengan paginasi)

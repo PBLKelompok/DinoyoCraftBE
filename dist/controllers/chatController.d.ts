@@ -34,4 +34,14 @@ export declare const markConversationAsRead: (req: Request, res: Response) => Pr
  * POST /api/chat/heartbeat
  */
 export declare const updateHeartbeat: (req: Request, res: Response) => Promise<void>;
+/**
+ * Mengambil akun Admin Customer Service resmi untuk eskalasi Live Chat dari ClayBot / Pusat Bantuan
+ * GET /api/chat/cs-agent
+ */
+export declare const getCsAgent: (_req: Request, res: Response) => Promise<void>;
+/**
+ * Menghapus riwayat percakapan antara user yang sedang login dengan targetUserId
+ * DELETE /api/chat/messages/:targetUserId
+ */
+export declare const deleteConversation: (req: Request, res: Response) => Promise<void>;
 //# sourceMappingURL=chatController.d.ts.map

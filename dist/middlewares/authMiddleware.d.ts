@@ -7,6 +7,12 @@ import { UserRole } from '../types/index.js';
  */
 export declare const verifyToken: (req: Request, res: Response, next: NextFunction) => Promise<void>;
 /**
+ * optionalVerifyToken
+ * Mengekstrak identitas user bila header Authorization / cookie JWT valid,
+ * namun tetap melanjutkan request (next) bila tidak ada token (untuk endpoint hybrid/publik).
+ */
+export declare const optionalVerifyToken: (req: Request, res: Response, next: NextFunction) => Promise<void>;
+/**
  * requireRole
  * Middleware untuk membatasi akses berdasarkan peran (RBAC).
  * Harus digunakan SETELAH verifyToken.

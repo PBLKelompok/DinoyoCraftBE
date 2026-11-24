@@ -332,11 +332,15 @@ export const ensureSystemLogsSchema = async (): Promise<void> => {
       AND event_name = 'transaction.qris.generated'
   `);
 
-  // Seed data awal yang representatif jika tabel masih kosong agar Admin langsung dapat menguji seluruh filter & korelasi
-  const [countRows]: any = await pool.query('SELECT COUNT(*) AS total FROM system_logs');
-  const total = Number(countRows?.[0]?.total || 0);
-  if (total === 0) {
-    await seedInitialSystemLogs();
+  // Seed data awal hanya di non-production (atau jika SEED_DEMO_LOGS=true) agar DB production bersih dari log demo
+  const allowDemoSeed =
+    process.env['NODE_ENV'] !== 'production' || process.env['SEED_DEMO_LOGS'] === 'true';
+  if (allowDemoSeed) {
+    const [countRows]: any = await pool.query('SELECT COUNT(*) AS total FROM system_logs');
+    const total = Number(countRows?.[0]?.total || 0);
+    if (total === 0) {
+      await seedInitialSystemLogs();
+    }
   }
 
   // Catat log pending untuk transaksi/pesanan yang saat ini masih belum dibayar agar langsung terlihat di System Logs

@@ -43,7 +43,13 @@ const authMiddleware_js_1 = require("../middlewares/authMiddleware.js");
 const validatorMiddleware_js_1 = require("../middlewares/validatorMiddleware.js");
 const schemas_js_1 = require("../validators/schemas.js");
 const router = (0, express_1.Router)();
-// Semua route AI memerlukan autentikasi
+/**
+ * @route   POST /api/ai/chat
+ * @desc    ClayBot — Asisten Virtual Katalog & Bantuan Pelanggan DinoyoCraft
+ * @access  Public / Optional Auth (pengunjung, mitra, admin)
+ */
+router.post('/chat', authMiddleware_js_1.optionalVerifyToken, (0, validatorMiddleware_js_1.validateZod)(schemas_js_1.aiChatSchema), aiController.chatWithClayBot);
+// Semua route analisis bisnis di bawah memerlukan autentikasi
 router.use(authMiddleware_js_1.verifyToken);
 /**
  * @route   POST /api/ai/analyze

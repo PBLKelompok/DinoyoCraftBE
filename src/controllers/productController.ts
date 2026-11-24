@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import pool from '../config/database.js';
+import { getUploadedFileUrl } from '../middlewares/uploadMiddleware.js';
 
 export interface ProductVariantItem {
   name: string;
@@ -260,9 +261,10 @@ export const tambahProduk = async (req: Request, res: Response): Promise<void> =
 
     // Tangani file foto jika diupload, atau URL foto eksternal
     const file = req.file;
+    const uploadedFileUrl = getUploadedFileUrl(file);
     const rawUrl = typeof image_url === 'string' ? image_url.trim() : '';
-    const imageUrls = file
-      ? JSON.stringify([`/uploads/${file.filename}`])
+    const imageUrls = uploadedFileUrl
+      ? JSON.stringify([uploadedFileUrl])
       : rawUrl && (rawUrl.startsWith('http://') || rawUrl.startsWith('https://'))
         ? JSON.stringify([rawUrl])
         : null;

@@ -23,6 +23,7 @@ const getCart = async (_req, res) => {
          p.name AS product_name,
          p.price AS product_price,
          p.stock AS product_stock,
+         p.variants AS product_variants,
          p.weight_gram,
          p.image_urls,
          m.id AS mitra_id,
@@ -31,7 +32,7 @@ const getCart = async (_req, res) => {
        FROM carts c
        JOIN products p ON c.product_id = p.id
        JOIN mitra_profiles m ON p.mitra_id = m.id
-       WHERE c.user_id = ? AND p.is_deleted = 0
+       WHERE c.user_id = ? AND p.is_deleted = 0 AND m.is_active = 1 AND m.is_verified = 1
        ORDER BY c.id DESC`, [userId]);
         // Format foto produk jika JSON string
         const formattedItems = items.map((item) => {
@@ -47,8 +48,10 @@ const getCart = async (_req, res) => {
             else if (Array.isArray(item.image_urls)) {
                 images = item.image_urls;
             }
+            const availableStock = (0, productController_js_1.getVariantAvailableStock)(item.product_variants, Number(item.product_stock) || 0, item.variant);
             return {
                 ...item,
+                product_stock: availableStock,
                 image_urls: images,
                 subtotal: Number(item.product_price) * item.quantity,
             };

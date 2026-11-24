@@ -20,5 +20,7 @@ export declare const getDeletionRequests: (req: Request, res: Response) => Promi
  */
 export declare const handleDeletionAction: (req: Request, res: Response) => Promise<void>;
 export declare const submitReport: (req: Request, res: Response) => Promise<void>;
+export declare const getMyAccountDeletionStatus: (req: Request, res: Response) => Promise<void>;
 export declare const submitAccountDeletion: (req: Request, res: Response) => Promise<void>;
+export declare const cancelMyAccountDeletion: (req: Request, res: Response) => Promise<void>;
 //# sourceMappingURL=moderationController.d.ts.map

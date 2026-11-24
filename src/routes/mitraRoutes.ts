@@ -16,6 +16,7 @@ import {
 } from '../controllers/mitraController.js';
 import { getStoreProfile } from '../controllers/storeController.js';
 import { verifyToken } from '../middlewares/authMiddleware.js';
+import upload from '../middlewares/uploadMiddleware.js';
 import { validateZod } from '../middlewares/validatorMiddleware.js';
 import { updateProductSchema } from '../validators/schemas.js';
 
@@ -34,6 +35,6 @@ router.get('/finance', verifyToken, getFinanceReport);
 router.get('/wallet', verifyToken, getMitraWallet);
 router.post('/wallet/withdraw', verifyToken, requestMitraWithdrawal);
 router.get('/orders', verifyToken, getOrders);
-router.put('/products/:id', verifyToken, validateZod(updateProductSchema), updateProduct);
+router.put('/products/:id', verifyToken, upload.single('image'), validateZod(updateProductSchema), updateProduct);
 
 export default router;

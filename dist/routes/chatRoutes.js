@@ -16,9 +16,11 @@ const uploadMiddleware_js_1 = __importDefault(require("../middlewares/uploadMidd
 const router = (0, express_1.Router)();
 router.use(authMiddleware_js_1.verifyToken);
 router.get('/contacts', chatController_js_1.getChatContacts);
+router.get('/cs-agent', chatController_js_1.getCsAgent);
 router.get('/unread-count', chatController_js_1.getUnreadChatCount);
 router.post('/heartbeat', chatController_js_1.updateHeartbeat);
 router.get('/messages/:targetUserId', chatController_js_1.getMessages);
+router.delete('/messages/:targetUserId', chatController_js_1.deleteConversation);
 router.patch('/messages/:targetUserId/read', chatController_js_1.markConversationAsRead);
 router.post('/send/:targetUserId', uploadMiddleware_js_1.default.any(), (0, validatorMiddleware_js_1.validateZod)(schemas_js_1.sendMessageSchema), chatController_js_1.sendMessage);
 router.post('/send', uploadMiddleware_js_1.default.any(), (0, validatorMiddleware_js_1.validateZod)(schemas_js_1.sendMessageSchema), chatController_js_1.sendMessage);

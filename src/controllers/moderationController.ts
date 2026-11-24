@@ -4,7 +4,7 @@
 // ============================================================
 
 import { Request, Response } from 'express';
-import bcrypt from 'bcrypt';
+import bcrypt from 'bcryptjs';
 import pool from '../config/database.js';
 
 let tablesInitialized = false;

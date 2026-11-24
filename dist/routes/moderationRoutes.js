@@ -13,9 +13,11 @@ const authMiddleware_js_1 = require("../middlewares/authMiddleware.js");
 const validatorMiddleware_js_1 = require("../middlewares/validatorMiddleware.js");
 const schemas_js_1 = require("../validators/schemas.js");
 const router = express_1.default.Router();
-// Submission Endpoints (Dapat diakses pengguna / mobile)
-router.post('/report', moderationController_js_1.submitReport);
-router.post('/account-deletion', moderationController_js_1.submitAccountDeletion);
+// Submission & Status Endpoints (Pengguna / Mobile)
+router.post('/report', authMiddleware_js_1.optionalVerifyToken, moderationController_js_1.submitReport);
+router.get('/account-deletion/me', authMiddleware_js_1.verifyToken, moderationController_js_1.getMyAccountDeletionStatus);
+router.post('/account-deletion', authMiddleware_js_1.verifyToken, moderationController_js_1.submitAccountDeletion);
+router.delete('/account-deletion/me', authMiddleware_js_1.verifyToken, moderationController_js_1.cancelMyAccountDeletion);
 // Tab 1: Laporan Pelanggaran (Admin Only)
 router.get('/reports', authMiddleware_js_1.verifyToken, authMiddleware_js_1.isAdmin, moderationController_js_1.getReports);
 router.put('/reports/:id/action', authMiddleware_js_1.verifyToken, authMiddleware_js_1.isAdmin, (0, validatorMiddleware_js_1.validateZod)(schemas_js_1.handleReportActionSchema), moderationController_js_1.handleReportAction);

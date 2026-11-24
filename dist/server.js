@@ -13,10 +13,15 @@ const database_js_1 = require("./config/database.js");
 const AiSetting_js_1 = __importDefault(require("./models/AiSetting.js"));
 const paymentPoller_js_1 = require("./services/paymentPoller.js");
 const loggingService_js_1 = require("./services/loggingService.js");
+const migrate_js_1 = require("./scripts/migrate.js");
+const aiProviderService_js_1 = require("./services/aiProviderService.js");
 const PORT = process.env.PORT || 5000;
 const startServer = async () => {
     // Tes koneksi database sebelum server mulai menerima request
     await (0, database_js_1.testConnection)();
+    // Sinkronisasi struktur tabel & kolom tambahan secara non-destructive
+    await (0, migrate_js_1.ensureDatabaseStructure)({ verbose: false });
+    console.log('✅ Database tables & incremental columns verified (non-destructive).');
     // Pastikan tabel system_logs dan index siap (§9.2, §14.1)
     await (0, loggingService_js_1.ensureSystemLogsSchema)();
     console.log('✅ System Logs table & indexes synced and ready.');
@@ -25,10 +30,11 @@ const startServer = async () => {
     await AiSetting_js_1.default.findOrCreate({
         where: { id: 1 },
         defaults: {
-            is_auto_reply_active: false,
-            model_name: 'gemini-1.5-pro',
+            is_auto_reply_active: true,
+            provider: null,
+            model_name: 'gemini-3.5-flash-lite',
             api_key: '',
-            system_prompt: 'Anda adalah Asisten Virtual resmi dari Kampung Keramik Dinoyo. Tugas Anda adalah melayani pelanggan, memberikan info seputar harga dan jadwal bengkel, serta membantu proses pemesanan dengan ramah dan sopan.',
+            system_prompt: aiProviderService_js_1.DEFAULT_DINOYOCRAFT_SYSTEM_PROMPT,
         },
     });
     console.log('✅ AI Settings table synced and ready.');
@@ -47,6 +53,28 @@ const startServer = async () => {
     server.on('error', (err) => {
         console.error('❌ Server HTTP error:', err);
     });
+    let shuttingDown = false;
+    const gracefulShutdown = (signal) => {
+        if (shuttingDown)
+            return;
+        shuttingDown = true;
+        console.log(`🛑 Received ${signal}, shutting down gracefully...`);
+        const forceExitTimer = setTimeout(() => {
+            console.warn('⚠️ Shutdown timeout reached, forcing exit.');
+            process.exit(1);
+        }, 10_000);
+        forceExitTimer.unref?.();
+        server.close(async () => {
+            try {
+                await Promise.allSettled([database_js_1.pool.end(), database_js_1.sequelize.close()]);
+            }
+            finally {
+                process.exit(0);
+            }
+        });
+    };
+    process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+    process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 };
 // Handle unhandled promise rejections
 process.on('unhandledRejection', (reason) => {
@@ -88,10 +116,6 @@ process.on('uncaughtException', (err) => {
 });
 process.on('exit', (code) => {
     console.log(`🛑 Node process exited with code: ${code}`);
-});
-process.on('SIGINT', () => {
-    console.log('🛑 Received SIGINT, shutting down gracefully...');
-    process.exit(0);
 });
 startServer().catch((err) => {
     console.error('❌ Gagal menjalankan server:', err);

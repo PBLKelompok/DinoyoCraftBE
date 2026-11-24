@@ -60,11 +60,11 @@ export declare const updateOrderStatusSchema: z.ZodObject<{
 }, z.core.$strip>;
 export declare const createReviewSchema: z.ZodObject<{
     product_id: z.ZodCoercedNumber<unknown>;
-    order_item_id: z.ZodNullable<z.ZodOptional<z.ZodCoercedNumber<unknown>>>;
+    order_item_id: z.ZodPreprocess<z.ZodOptional<z.ZodNullable<z.ZodCoercedNumber<unknown>>>, unknown>;
     rating: z.ZodCoercedNumber<unknown>;
     variant: z.ZodNullable<z.ZodOptional<z.ZodString>>;
     comment: z.ZodNullable<z.ZodOptional<z.ZodString>>;
-    photo_urls: z.ZodNullable<z.ZodOptional<z.ZodArray<z.ZodString>>>;
+    photo_urls: z.ZodNullable<z.ZodOptional<z.ZodUnion<readonly [z.ZodArray<z.ZodString>, z.ZodString]>>>;
 }, z.core.$strip>;
 export declare const replyReviewSchema: z.ZodObject<{
     seller_reply: z.ZodString;
@@ -81,15 +81,24 @@ export declare const registerMitraSchema: z.ZodObject<{
 export declare const loginSchema: z.ZodObject<{
     email: z.ZodString;
     password: z.ZodString;
+    portal: z.ZodOptional<z.ZodEnum<{
+        mobile: "mobile";
+        web: "web";
+    }>>;
 }, z.core.$strip>;
 export declare const googleLoginSchema: z.ZodObject<{
     credential: z.ZodOptional<z.ZodString>;
     id_token: z.ZodOptional<z.ZodString>;
     token: z.ZodOptional<z.ZodString>;
+    access_token: z.ZodOptional<z.ZodString>;
     role: z.ZodOptional<z.ZodEnum<{
         admin: "admin";
         mitra: "mitra";
         pengunjung: "pengunjung";
+    }>>;
+    portal: z.ZodOptional<z.ZodEnum<{
+        mobile: "mobile";
+        web: "web";
     }>>;
     userInfo: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodAny>>;
     is_register: z.ZodOptional<z.ZodBoolean>;
@@ -109,8 +118,10 @@ export declare const resetPasswordSchema: z.ZodObject<{
     otp: z.ZodNullable<z.ZodOptional<z.ZodString>>;
 }, z.core.$strip>;
 export declare const updateProfileSchema: z.ZodObject<{
+    name: z.ZodOptional<z.ZodString>;
     ownerName: z.ZodOptional<z.ZodString>;
     nama: z.ZodOptional<z.ZodString>;
+    username: z.ZodOptional<z.ZodString>;
     storeName: z.ZodOptional<z.ZodString>;
     nama_toko: z.ZodOptional<z.ZodString>;
     phone: z.ZodOptional<z.ZodString>;
@@ -132,12 +143,29 @@ export declare const updateProfileSchema: z.ZodObject<{
     website: z.ZodNullable<z.ZodOptional<z.ZodString>>;
     instagram: z.ZodNullable<z.ZodOptional<z.ZodString>>;
 }, z.core.$strip>;
+export declare const changePasswordSchema: z.ZodObject<{
+    currentPassword: z.ZodNullable<z.ZodOptional<z.ZodString>>;
+    newPassword: z.ZodString;
+}, z.core.$strip>;
+export declare const requestTwoFactorOtpSchema: z.ZodObject<{
+    action: z.ZodEnum<{
+        disable: "disable";
+        enable: "enable";
+    }>;
+}, z.core.$strip>;
+export declare const verifyTwoFactorOtpSchema: z.ZodObject<{
+    action: z.ZodEnum<{
+        disable: "disable";
+        enable: "enable";
+    }>;
+    otp: z.ZodString;
+}, z.core.$strip>;
 export declare const createProductSchema: z.ZodObject<{
     name: z.ZodString;
     description: z.ZodNullable<z.ZodOptional<z.ZodString>>;
     price: z.ZodCoercedNumber<unknown>;
     stock: z.ZodCoercedNumber<unknown>;
-    category_id: z.ZodPreprocess<z.ZodNumber, unknown>;
+    category_id: z.ZodPreprocess<z.ZodUnion<readonly [z.ZodNumber, z.ZodString]>, unknown>;
     weight_gram: z.ZodOptional<z.ZodDefault<z.ZodCoercedNumber<unknown>>>;
     variants: z.ZodNullable<z.ZodOptional<z.ZodUnion<readonly [z.ZodString, z.ZodArray<z.ZodAny>]>>>;
     image_url: z.ZodNullable<z.ZodUnion<[z.ZodOptional<z.ZodString>, z.ZodLiteral<"">]>>;
@@ -148,13 +176,17 @@ export declare const updateProductSchema: z.ZodObject<{
     description: z.ZodNullable<z.ZodOptional<z.ZodString>>;
     price: z.ZodOptional<z.ZodCoercedNumber<unknown>>;
     stock: z.ZodOptional<z.ZodCoercedNumber<unknown>>;
-    category_id: z.ZodPreprocess<z.ZodOptional<z.ZodNumber>, unknown>;
+    category_id: z.ZodPreprocess<z.ZodOptional<z.ZodUnion<readonly [z.ZodNumber, z.ZodString]>>, unknown>;
     weight_gram: z.ZodOptional<z.ZodCoercedNumber<unknown>>;
     variants: z.ZodNullable<z.ZodOptional<z.ZodUnion<readonly [z.ZodString, z.ZodArray<z.ZodAny>]>>>;
 }, z.core.$strip>;
 export declare const sendMessageSchema: z.ZodObject<{
     message: z.ZodNullable<z.ZodOptional<z.ZodString>>;
     image_url: z.ZodNullable<z.ZodOptional<z.ZodString>>;
+    metadata: z.ZodNullable<z.ZodOptional<z.ZodUnion<readonly [z.ZodRecord<z.ZodString, z.ZodAny>, z.ZodString]>>>;
+    targetUserId: z.ZodNullable<z.ZodOptional<z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>>;
+    target_user_id: z.ZodNullable<z.ZodOptional<z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>>;
+    receiver_id: z.ZodNullable<z.ZodOptional<z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>>;
 }, z.core.$strip>;
 export declare const updateUserStatusSchema: z.ZodObject<{
     is_active: z.ZodCoercedBoolean<unknown>;
@@ -180,6 +212,32 @@ export declare const aiAnalysisSchema: z.ZodObject<{
     productCategory: z.ZodNullable<z.ZodOptional<z.ZodString>>;
     targetMarket: z.ZodNullable<z.ZodOptional<z.ZodString>>;
     additionalNotes: z.ZodNullable<z.ZodOptional<z.ZodString>>;
+}, z.core.$strip>;
+export declare const aiChatSchema: z.ZodObject<{
+    message: z.ZodString;
+    original_message: z.ZodNullable<z.ZodOptional<z.ZodString>>;
+    history: z.ZodOptional<z.ZodArray<z.ZodObject<{
+        role: z.ZodEnum<{
+            assistant: "assistant";
+            model: "model";
+            user: "user";
+        }>;
+        content: z.ZodString;
+    }, z.core.$strip>>>;
+    locale: z.ZodOptional<z.ZodEnum<{
+        en: "en";
+        id: "id";
+    }>>;
+    role_context: z.ZodOptional<z.ZodEnum<{
+        customer: "customer";
+        mitra: "mitra";
+        store_bot: "store_bot";
+    }>>;
+    store_name: z.ZodNullable<z.ZodOptional<z.ZodString>>;
+    store_user_id: z.ZodNullable<z.ZodOptional<z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>>;
+    target_user_id: z.ZodNullable<z.ZodOptional<z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>>;
+    product_name: z.ZodNullable<z.ZodOptional<z.ZodString>>;
+    save_to_chat: z.ZodOptional<z.ZodBoolean>;
 }, z.core.$strip>;
 export declare const handleReportActionSchema: z.ZodObject<{
     action: z.ZodEnum<{

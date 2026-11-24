@@ -6,6 +6,7 @@
 import { Request, Response } from 'express';
 import pool from '../config/database.js';
 import { sendSuccess, sendCreated, sendNotFound, sendForbidden, sendError } from '../utils/response.js';
+import { getUploadedFileUrl } from '../middlewares/uploadMiddleware.js';
 
 export const getProductReviews = async (req: Request, res: Response): Promise<void> => {
   try {
@@ -198,8 +199,9 @@ export const createReview = async (req: Request, res: Response): Promise<void> =
     const reqFiles = (req as any).files;
     if (Array.isArray(reqFiles)) {
       for (const f of reqFiles) {
-        if (f?.filename) {
-          collectedPhotos.push(`/uploads/${f.filename}`);
+        const fileUrl = getUploadedFileUrl(f);
+        if (fileUrl) {
+          collectedPhotos.push(fileUrl);
         }
       }
     }

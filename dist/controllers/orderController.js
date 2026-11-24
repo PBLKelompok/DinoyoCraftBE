@@ -18,6 +18,15 @@ const productController_js_1 = require("./productController.js");
 const midtransService_js_1 = require("../services/midtransService.js");
 const paymentGatewayService_js_1 = require("../services/paymentGatewayService.js");
 // ============================================================
+// HELPER — format kode pesanan Mitra (`ORD-YYYYMMDD-00<id>`)
+// ============================================================
+const formatMitraOrderCode = (orderId, createdAt) => {
+    const parsed = createdAt ? new Date(createdAt) : new Date();
+    const validDate = isNaN(parsed.getTime()) ? new Date() : parsed;
+    const dateStr = validDate.toISOString().split('T')[0].replace(/-/g, '');
+    return `ORD-${dateStr}-00${orderId}`;
+};
+// ============================================================
 // HELPER — catat riwayat status pesanan (timeline tracking)
 // ============================================================
 async function recordOrderStatusHistory(orderId, status, trackingNumber, note, conn) {
@@ -53,24 +62,46 @@ const checkout = async (req, res) => {
             return;
         }
         // 2. Validasi Mitra
-        const [mitras] = await connection.query('SELECT id, user_id, store_name FROM mitra_profiles WHERE id = ? AND is_active = 1', [mitra_id]);
+        const [mitras] = await connection.query('SELECT id, user_id, store_name FROM mitra_profiles WHERE id = ? AND is_active = 1 AND is_verified = 1', [mitra_id]);
         if (mitras.length === 0) {
             await connection.rollback();
-            (0, response_js_1.sendBadRequest)(res, 'Toko mitra tidak valid atau sedang tidak aktif.');
+            (0, response_js_1.sendBadRequest)(res, 'Toko mitra tidak valid, belum terverifikasi, atau sedang tidak aktif.');
             return;
         }
         // 3. Validasi Produk & Hitung Subtotal
         let totalItemsAmount = 0;
         const validatedItems = [];
         for (const item of items) {
-            const [prodRows] = await connection.query('SELECT id, name, price, stock, variants, is_deleted FROM products WHERE id = ? FOR UPDATE', [item.product_id]);
+            const [prodRows] = await connection.query('SELECT id, mitra_id, name, price, stock, variants, is_deleted FROM products WHERE id = ? FOR UPDATE', [item.product_id]);
             if (prodRows.length === 0 || prodRows[0].is_deleted) {
                 await connection.rollback();
                 (0, response_js_1.sendBadRequest)(res, `Produk dengan ID ${item.product_id} tidak ditemukan atau sudah dihapus.`);
                 return;
             }
             const prod = prodRows[0];
-            const availableStock = (0, productController_js_1.getVariantAvailableStock)(prod.variants, Number(prod.stock) || 0, item.variant);
+            if (Number(prod.mitra_id) !== Number(mitra_id)) {
+                await connection.rollback();
+                (0, response_js_1.sendBadRequest)(res, `Produk '${prod.name}' berasal dari toko berbeda dan tidak dapat digabung dalam satu pesanan.`);
+                return;
+            }
+            const prodVariants = (0, productController_js_1.parseVariants)(prod.variants);
+            let effectiveVariant = item.variant ? String(item.variant).trim() : null;
+            if (prodVariants.length > 0) {
+                if (effectiveVariant) {
+                    const matched = prodVariants.find((v) => v.name.trim().toLowerCase() === effectiveVariant.toLowerCase());
+                    if (!matched) {
+                        await connection.rollback();
+                        (0, response_js_1.sendBadRequest)(res, `Varian '${effectiveVariant}' untuk produk '${prod.name}' tidak tersedia.`);
+                        return;
+                    }
+                    effectiveVariant = matched.name;
+                }
+                else {
+                    const fallbackVariant = prodVariants.find((v) => v.stock >= item.quantity) ?? prodVariants[0];
+                    effectiveVariant = fallbackVariant.name;
+                }
+            }
+            const availableStock = (0, productController_js_1.getVariantAvailableStock)(prod.variants, Number(prod.stock) || 0, effectiveVariant);
             if (availableStock < item.quantity) {
                 await connection.rollback();
                 (0, response_js_1.sendBadRequest)(res, `Stok produk '${prod.name}' tidak mencukupi (tersedia: ${availableStock}, diminta: ${item.quantity}).`);
@@ -83,7 +114,8 @@ const checkout = async (req, res) => {
                 name: prod.name,
                 quantity: item.quantity,
                 unit_price: unitPrice,
-                variant: item.variant || null,
+                variant: effectiveVariant,
+                cart_variant: item.variant || null,
             });
         }
         const grandTotal = totalItemsAmount + Number(shipping_cost);
@@ -106,8 +138,8 @@ const checkout = async (req, res) => {
             await connection.query(`INSERT INTO order_items (order_id, product_id, quantity, unit_price, variant)
          VALUES (?, ?, ?, ?, ?)`, [orderId, item.product_id, item.quantity, item.unit_price, item.variant]);
             await (0, productController_js_1.adjustProductStockAndVariant)(connection, item.product_id, -item.quantity, item.variant);
-            // Hapus item dari keranjang user jika ada
-            await connection.query('DELETE FROM carts WHERE user_id = ? AND product_id = ?', [userId, item.product_id]);
+            // Hapus item varian terkait dari keranjang user jika ada
+            await connection.query('DELETE FROM carts WHERE user_id = ? AND product_id = ? AND (variant <=> ? OR (? IS NOT NULL AND variant <=> ?))', [userId, item.product_id, item.cart_variant, item.variant, item.variant]);
         }
         // 7b. Catat status awal untuk timeline tracking
         await recordOrderStatusHistory(orderId, 'pending', null, 'Pesanan dibuat, menunggu pembayaran', connection);
@@ -184,6 +216,7 @@ const getUserOrders = async (req, res) => {
         o.status,
         o.created_at,
         m.id AS mitra_id,
+        m.user_id AS mitra_user_id,
         m.store_name,
         m.whatsapp_number AS mitra_phone,
         t.reference_code,
@@ -241,6 +274,7 @@ const getUserOrders = async (req, res) => {
                 : (0, paymentGatewayService_js_1.toIsoWibString)(o.expiry_time);
             return {
                 ...o,
+                mitra_order_code: formatMitraOrderCode(o.id, o.created_at),
                 created_at: (0, paymentGatewayService_js_1.toIsoWibString)(o.created_at) ?? o.created_at,
                 expiry_time: deadline,
                 paid_at: (0, paymentGatewayService_js_1.toIsoWibString)(o.paid_at),
@@ -409,9 +443,10 @@ const updateOrderStatus = async (req, res) => {
         const role = res.locals['role'];
         const { id } = req.params;
         const { status, tracking_number, shipping_method } = req.body;
-        const [orders] = await connection.query(`SELECT o.*, m.user_id AS mitra_user_id 
+        const [orders] = await connection.query(`SELECT o.*, m.user_id AS mitra_user_id, t.gateway_order_id 
        FROM orders o
        JOIN mitra_profiles m ON o.mitra_id = m.id
+       LEFT JOIN transactions t ON o.transaction_id = t.id
        WHERE o.id = ? FOR UPDATE`, [id]);
         if (orders.length === 0) {
             await connection.rollback();
@@ -441,6 +476,11 @@ const updateOrderStatus = async (req, res) => {
         if (order.status === 'cancelled' || order.status === 'completed') {
             await connection.rollback();
             (0, response_js_1.sendBadRequest)(res, `Pesanan berstatus "${order.status}" sudah final dan tidak dapat diubah.`);
+            return;
+        }
+        if (status === 'paid' && role !== 'admin') {
+            await connection.rollback();
+            (0, response_js_1.sendForbidden)(res, 'Status "paid" hanya dapat dikonfirmasi otomatis melalui pembayaran Midtrans atau Admin.');
             return;
         }
         if (order.status === 'pending' && ['packed', 'shipped', 'completed'].includes(status)) {
@@ -520,6 +560,9 @@ const updateOrderStatus = async (req, res) => {
             await recordOrderStatusHistory(Number(id), status, nextTracking || order.tracking_number || null, notes[status] || null, connection);
         }
         await connection.commit();
+        if (status === 'cancelled' && order.status !== 'cancelled' && order.gateway_order_id) {
+            await (0, paymentGatewayService_js_1.cancelRemoteChargeIfAny)(order.gateway_order_id);
+        }
         // Dorong update realtime ke HP customer & mitra (non-blocking).
         try {
             await pusher_js_1.default.trigger(`user-${order.user_id}`, 'order-status-changed', {
@@ -579,6 +622,7 @@ exports.confirmOrderCompleted = confirmOrderCompleted;
 const cancelOrderByCustomer = async (req, res) => {
     const connection = await database_js_1.default.getConnection();
     try {
+        await connection.beginTransaction();
         const userId = res.locals['userId'];
         const role = res.locals['role'];
         const { id } = req.params;
@@ -586,23 +630,25 @@ const cancelOrderByCustomer = async (req, res) => {
        FROM orders o
        JOIN mitra_profiles m ON o.mitra_id = m.id
        LEFT JOIN transactions t ON o.transaction_id = t.id
-       WHERE o.id = ?`, [id]);
+       WHERE o.id = ? FOR UPDATE`, [id]);
         if (orders.length === 0) {
+            await connection.rollback();
             (0, response_js_1.sendNotFound)(res, 'Pesanan tidak ditemukan.');
             return;
         }
         const order = orders[0];
         // Hanya pemilik pesanan (atau admin) yang boleh membatalkan.
         if (order.user_id !== userId && role !== 'admin') {
+            await connection.rollback();
             (0, response_js_1.sendForbidden)(res, 'Hanya pemilik pesanan yang dapat membatalkannya.');
             return;
         }
         // Belum-bayar saja — pesanan yang sudah dibayar/diproses mengikuti alur mitra.
         if (order.status !== 'pending') {
+            await connection.rollback();
             (0, response_js_1.sendBadRequest)(res, `Pesanan dengan status "${order.status}" tidak dapat dibatalkan langsung. Hubungi penjual bila diperlukan.`);
             return;
         }
-        await connection.beginTransaction();
         // Kembalikan stok produk.
         const [items] = await connection.query('SELECT product_id, quantity, variant FROM order_items WHERE order_id = ?', [id]);
         for (const item of items) {
@@ -653,7 +699,7 @@ const getOrderTracking = async (req, res) => {
         const { id } = req.params;
         const [orders] = await database_js_1.default.query(`SELECT o.id, o.user_id, o.status, o.tracking_number, o.shipping_method,
               o.shipping_cost, o.total_amount, t.gateway_fee, o.created_at,
-              m.store_name, m.workshop_address,
+              m.user_id AS mitra_user_id, m.store_name, m.workshop_address,
               t.reference_code
        FROM orders o
        JOIN mitra_profiles m ON o.mitra_id = m.id
@@ -684,6 +730,7 @@ const getOrderTracking = async (req, res) => {
         const trackingTotals = computeOrderTotals(order);
         (0, response_js_1.sendSuccess)(res, {
             order_id: order.id,
+            mitra_order_code: formatMitraOrderCode(order.id, order.created_at),
             status: order.status,
             tracking_number: order.tracking_number,
             shipping_method: order.shipping_method,
@@ -693,6 +740,7 @@ const getOrderTracking = async (req, res) => {
             channel_fee: trackingTotals.channel,
             total_due: trackingTotals.total_due,
             reference_code: order.reference_code,
+            mitra_user_id: order.mitra_user_id,
             store_name: order.store_name,
             created_at: order.created_at,
             timeline: history,

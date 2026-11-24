@@ -9,33 +9,10 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.logHttpRequest = exports.logSystemEvent = exports.ensureSystemLogsSchema = exports.computeRetentionExpiry = exports.deriveHttpStatusReason = exports.classifyRouteCategory = exports.normalizeRouteTemplate = exports.sanitizeMetadata = exports.sanitizeText = exports.sanitizeStack = exports.maskIp = exports.maskPhone = exports.maskEmail = exports.generateRequestId = exports.generateEventId = exports.getPusherClient = void 0;
 const crypto_1 = __importDefault(require("crypto"));
-const pusher_1 = __importDefault(require("pusher"));
 const database_js_1 = __importDefault(require("../config/database.js"));
-// Inisialisasi Pusher untuk Live Logs Admin
-let pusherClient = null;
-const getPusherClient = () => {
-    if (pusherClient)
-        return pusherClient;
-    const appId = process.env.PUSHER_APP_ID;
-    const key = process.env.PUSHER_KEY || process.env.PUSHER_APP_KEY;
-    const secret = process.env.PUSHER_SECRET || process.env.PUSHER_APP_SECRET;
-    const cluster = process.env.PUSHER_CLUSTER || 'ap1';
-    if (!appId || !key || !secret)
-        return null;
-    try {
-        pusherClient = new pusher_1.default({
-            appId,
-            key,
-            secret,
-            cluster,
-            useTLS: true,
-        });
-        return pusherClient;
-    }
-    catch {
-        return null;
-    }
-};
+const pusher_js_1 = require("../utils/pusher.js");
+// Inisialisasi Pusher untuk Live Logs Admin (berbagi circuit breaker dengan src/utils/pusher.ts)
+const getPusherClient = () => ((0, pusher_js_1.isPusherAvailable)() ? pusher_js_1.pusher : null);
 exports.getPusherClient = getPusherClient;
 // Pembuat Event ID yang unik dan berurutan berdasarkan waktu (ULID-like)
 const generateEventId = () => {
@@ -286,7 +263,7 @@ const ensureSystemLogsSchema = async () => {
       KEY \`idx_system_logs_status_occurred\` (\`status_code\`, \`occurred_at\`)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
   `);
-    // Bersihkan sisa demo/log legacy SociaBuzz (scbz) dan fake seed error SMTP agar tidak membingungkan
+    // Bersihkan sisa demo/log legacy SociaBuzz (scbz), noise asset 404, Pusher 400 historis, dan burst pre-migrasi
     await database_js_1.default.query(`
     DELETE FROM system_logs
     WHERE request_id = 'req_demo_ext_01'
@@ -295,6 +272,15 @@ const ensureSystemLogsSchema = async () => {
        OR LOWER(COALESCE(error_message, '')) LIKE '%x-callback-token%'
        OR LOWER(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(metadata_json, '$.gateway')), '')) LIKE '%sociabuzz%'
        OR LOWER(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(metadata_json, '$.gateway')), '')) LIKE '%scbz%'
+       OR (event_name = 'external.pusher.publish_failed' AND (message LIKE '%Unexpected status code 400%' OR error_message LIKE '%Unexpected status code 400%'))
+       OR (event_name = 'system.route.not_found' AND (route_template LIKE '/uploads/%' OR route_template = '/favicon.ico'))
+       OR (
+         occurred_at < '2026-11-18 00:00:00'
+         AND (
+           (status_code = 500 AND route_template IN ('/api/chat/contacts', '/api/chat/messages/:id', '/api/chat/send/:id'))
+           OR (event_name = 'mobile.api.server_error' AND (message LIKE '%riwayat pesan%' OR message LIKE '%mengirim pesan%' OR message LIKE '%daftar kontak chat%'))
+         )
+       )
   `);
     // Mutakhirkan seed transaksi pending demo lama agar akurat merepresentasikan status pending pembayaran
     await database_js_1.default.query(`
@@ -307,11 +293,14 @@ const ensureSystemLogsSchema = async () => {
     WHERE request_id = 'req_demo_trx_02'
       AND event_name = 'transaction.qris.generated'
   `);
-    // Seed data awal yang representatif jika tabel masih kosong agar Admin langsung dapat menguji seluruh filter & korelasi
-    const [countRows] = await database_js_1.default.query('SELECT COUNT(*) AS total FROM system_logs');
-    const total = Number(countRows?.[0]?.total || 0);
-    if (total === 0) {
-        await seedInitialSystemLogs();
+    // Seed data awal hanya di non-production (atau jika SEED_DEMO_LOGS=true) agar DB production bersih dari log demo
+    const allowDemoSeed = process.env['NODE_ENV'] !== 'production' || process.env['SEED_DEMO_LOGS'] === 'true';
+    if (allowDemoSeed) {
+        const [countRows] = await database_js_1.default.query('SELECT COUNT(*) AS total FROM system_logs');
+        const total = Number(countRows?.[0]?.total || 0);
+        if (total === 0) {
+            await seedInitialSystemLogs();
+        }
     }
     // Catat log pending untuk transaksi/pesanan yang saat ini masih belum dibayar agar langsung terlihat di System Logs
     try {
@@ -381,6 +370,70 @@ const ensureSystemLogsSchema = async () => {
     }
     catch {
         // Abaikan jika tabel orders/transactions belum tersedia pada inisialisasi awal
+    }
+    // Catat log pending untuk pendaftaran/akun Mitra yang belum disetujui Admin agar langsung terlihat di System Logs
+    try {
+        const [pendingMitraRows] = await database_js_1.default.query(`
+      SELECT
+        m.id AS mitra_id,
+        m.user_id,
+        m.store_name,
+        m.is_verified,
+        m.rejection_reason,
+        m.created_at,
+        u.name AS owner_name,
+        u.email
+      FROM mitra_profiles m
+      INNER JOIN users u ON u.id = m.user_id
+      WHERE COALESCE(m.is_verified, 0) != 1
+        AND NOT EXISTS (
+          SELECT 1 FROM system_logs sl
+          WHERE sl.user_id = u.id
+            AND sl.outcome = 'pending'
+            AND sl.category IN ('auth', 'product_store')
+            AND sl.deleted_at IS NULL
+        )
+      ORDER BY m.id DESC
+      LIMIT 50
+    `);
+        for (const row of pendingMitraRows || []) {
+            const isRejected = Number(row.is_verified) === 2 || Boolean(row.rejection_reason);
+            const storeLabel = row.store_name || row.owner_name || 'Toko Mitra';
+            (0, exports.logSystemEvent)({
+                occurredAt: row.created_at ? new Date(row.created_at) : new Date(),
+                category: 'auth',
+                eventName: 'auth.mitra.register_pending',
+                severity: 'info',
+                outcome: 'pending',
+                message: isRejected
+                    ? `Pengajuan Mitra "${storeLabel}" (${row.email}) belum disetujui — menunggu perbaikan dokumen & verifikasi ulang Admin (PENDING)`
+                    : `Pendaftaran Mitra "${storeLabel}" (${row.email}) berstatus pending — menunggu persetujuan verifikasi Admin (PENDING)`,
+                source: 'backend',
+                service: 'api',
+                http: {
+                    method: 'POST',
+                    route: '/api/auth/register-mitra',
+                    statusCode: 201,
+                    durationMs: 0,
+                },
+                correlation: {
+                    requestId: `pending_mitra_${row.mitra_id}`,
+                    userId: Number(row.user_id),
+                    role: 'mitra',
+                },
+                metadata: {
+                    mitraId: Number(row.mitra_id),
+                    storeName: row.store_name || null,
+                    email: row.email,
+                    isVerified: Number(row.is_verified ?? 0),
+                    verificationStatus: isRejected ? 'rejected_awaiting_resubmission' : 'pending_approval',
+                    rejectionReason: row.rejection_reason || null,
+                },
+            }).catch(() => { });
+        }
+    }
+    catch {
+        // Abaikan jika tabel mitra_profiles/users belum tersedia pada inisialisasi awal
     }
 };
 exports.ensureSystemLogsSchema = ensureSystemLogsSchema;
@@ -738,10 +791,18 @@ exports.logSystemEvent = logSystemEvent;
 const logHttpRequest = (req, res, durationMs) => {
     const rawPath = req.originalUrl || req.url || req.path || '/';
     const cleanPath = rawPath.split('?')[0] || '/';
-    // Abaikan health check & endpoint polling daftar log admin agar tidak membanjiri stream
+    // Abaikan health check, endpoint polling log admin, serta aset statis sukses agar stream tetap bersih
     if (cleanPath === '/health' || cleanPath === '/api/health')
         return;
     if (req.method === 'GET' && cleanPath.startsWith('/api/admin/logs') && !cleanPath.endsWith('/export')) {
+        return;
+    }
+    if (res.statusCode < 500 &&
+        (cleanPath === '/favicon.ico' ||
+            cleanPath.startsWith('/uploads/') ||
+            cleanPath.startsWith('/api/uploads/') ||
+            cleanPath.startsWith('/stickers/') ||
+            cleanPath.startsWith('/assets/stickers/'))) {
         return;
     }
     const statusCode = res.statusCode || 200;

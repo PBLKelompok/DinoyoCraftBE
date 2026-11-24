@@ -1,9 +1,10 @@
 import { sendOTPEmail, getTransporter } from '../utils/emailService.js';
 import { Request, Response } from 'express';
-import bcrypt from 'bcrypt';
+import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { OAuth2Client } from 'google-auth-library';
 import db from '../config/database';
+import { getUploadedFileUrl } from '../middlewares/uploadMiddleware.js';
 
 // ============================================================
 // Helper JWT — Access + Refresh Token Pair
@@ -231,9 +232,11 @@ export const registerCustomer = async (req: Request, res: Response): Promise<voi
       },
     });
 
-    console.log('\n========================================');
-    console.log(`[DEV REGISTER OTP] Kode OTP untuk ${cleanEmail}: ${otp}`);
-    console.log('========================================\n');
+    if (process.env['NODE_ENV'] !== 'production') {
+      console.log('\n========================================');
+      console.log(`[DEV REGISTER OTP] Kode OTP untuk ${cleanEmail}: ${otp}`);
+      console.log('========================================\n');
+    }
 
     try {
       await sendOTPEmail(cleanEmail, otp, name.trim(), 'register');
@@ -399,9 +402,11 @@ export const registerMitra = async (req: Request, res: Response): Promise<void> 
       newUserId = userResult.insertId;
     }
 
-    const ktpUrl = `/uploads/${files.ktp_file[0].filename}`;
-    const nibUrl = `/uploads/${files.nib_file[0].filename}`;
-    const productImagesUrls = files.product_images.map(file => `/uploads/${file.filename}`);
+    const ktpUrl = getUploadedFileUrl(files.ktp_file[0]) ?? '';
+    const nibUrl = getUploadedFileUrl(files.nib_file[0]) ?? '';
+    const productImagesUrls = files.product_images
+      .map(file => getUploadedFileUrl(file))
+      .filter((url): url is string => Boolean(url));
 
     const [checkProfile]: any = await connection.query('SELECT id FROM mitra_profiles WHERE user_id = ?', [newUserId]);
     if (checkProfile.length > 0) {
@@ -572,9 +577,11 @@ export const login = async (req: Request, res: Response): Promise<void> => {
         [user.id, loginOtp]
       );
 
-      console.log('\n========================================');
-      console.log(`[DEV LOGIN 2FA OTP] Kode OTP untuk ${user.email}: ${loginOtp}`);
-      console.log('========================================\n');
+      if (process.env['NODE_ENV'] !== 'production') {
+        console.log('\n========================================');
+        console.log(`[DEV LOGIN 2FA OTP] Kode OTP untuk ${user.email}: ${loginOtp}`);
+        console.log('========================================\n');
+      }
 
       try {
         await sendOTPEmail(user.email, loginOtp, user.name, 'login');
@@ -1236,8 +1243,8 @@ export const updateProfile = async (req: Request, res: Response) => {
 
     const files = req.files as { [fieldname: string]: Express.Multer.File[] } | undefined;
 
-    const avatarPath = files?.['avatar']?.[0] ? `/uploads/${files['avatar'][0].filename}` : null;
-    const bannerPath = files?.['banner']?.[0] ? `/uploads/${files['banner'][0].filename}` : null;
+    const avatarPath = getUploadedFileUrl(files?.['avatar']?.[0]);
+    const bannerPath = getUploadedFileUrl(files?.['banner']?.[0]);
     const birthDate = req.body.birthDate ?? req.body.birth_date ?? null;
     const gender = req.body.gender ?? null;
 
@@ -1413,7 +1420,6 @@ setInterval(() => {
 // FORGOT PASSWORD Ã¢â‚¬â€ Kirim OTP ke email user
 // ============================================================
 export const forgotPassword = async (req: Request, res: Response): Promise<void> => {
-  console.log("=== API FORGOT PASSWORD DI-HIT ===", req.body);
   try {
     const { email } = req.body;
 
@@ -1450,10 +1456,12 @@ export const forgotPassword = async (req: Request, res: Response): Promise<void>
       console.warn('⚠️ Gagal menyimpan OTP ke database (fallback memory tetap aktif):', otpErr);
     }
 
-    // 4. Print ke terminal (Biar kamu tidak perlu nunggu email masuk saat testing!)
-    console.log(`\n========================================`);
-    console.log(`[DEV OTP] Kode OTP untuk ${cleanEmail}: ${otp}`);
-    console.log(`========================================\n`);
+    // 4. Print ke terminal hanya saat non-production
+    if (process.env['NODE_ENV'] !== 'production') {
+      console.log(`\n========================================`);
+      console.log(`[DEV OTP] Kode OTP untuk ${cleanEmail}: ${otp}`);
+      console.log(`========================================\n`);
+    }
 
     // 5. Kirim OTP via Email dengan Template Branded DinoyoCraft & Logo Project
     const logoUrl =
@@ -1818,15 +1826,21 @@ export const reuploadDocs = async (req: Request, res: Response): Promise<void> =
 
     if (ktpFile) {
       updates.push('ktp_file_url = ?');
-      params.push(`/uploads/${ktpFile.filename}`);
+      params.push(getUploadedFileUrl(ktpFile));
     }
     if (nibFile) {
       updates.push('nib_file_url = ?');
-      params.push(`/uploads/${nibFile.filename}`);
+      params.push(getUploadedFileUrl(nibFile));
     }
     if (productImages && productImages.length > 0) {
       updates.push('sample_product_images = ?');
-      params.push(JSON.stringify(productImages.map(f => `/uploads/${f.filename}`)));
+      params.push(
+        JSON.stringify(
+          productImages
+            .map(f => getUploadedFileUrl(f))
+            .filter((url): url is string => Boolean(url))
+        )
+      );
     }
 
     updates.push('is_verified = 0');
@@ -1973,9 +1987,11 @@ export const resendRegisterOtp = async (req: Request, res: Response): Promise<vo
       data: entry?.data,
     });
 
-    console.log('\n========================================');
-    console.log(`[DEV RESEND REGISTER OTP] Kode OTP untuk ${cleanEmail}: ${otp}`);
-    console.log('========================================\n');
+    if (process.env['NODE_ENV'] !== 'production') {
+      console.log('\n========================================');
+      console.log(`[DEV RESEND REGISTER OTP] Kode OTP untuk ${cleanEmail}: ${otp}`);
+      console.log('========================================\n');
+    }
 
     try {
       await sendOTPEmail(cleanEmail, otp, name || entry?.data?.name || 'Pengguna');

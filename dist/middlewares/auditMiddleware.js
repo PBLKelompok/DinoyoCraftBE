@@ -47,6 +47,14 @@ const auditLogger = (req, res, next) => {
             return;
         if (req.method === 'GET' && req.originalUrl?.startsWith('/api/admin/logs'))
             return;
+        const cleanAuditPath = (req.originalUrl || req.path || '').split('?')[0] || '';
+        if (cleanAuditPath === '/favicon.ico' ||
+            cleanAuditPath.startsWith('/uploads/') ||
+            cleanAuditPath.startsWith('/api/uploads/') ||
+            cleanAuditPath.startsWith('/stickers/') ||
+            cleanAuditPath.startsWith('/assets/stickers/')) {
+            return;
+        }
         database_js_1.default
             .execute(`INSERT INTO audit_logs (user_id, action, ip_address, user_agent, created_at)
          VALUES (?, ?, ?, ?, NOW())`, [userId ?? null, `[${role ?? 'guest'}] ${action}`, ipAddress, userAgent])

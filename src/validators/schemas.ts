@@ -119,10 +119,10 @@ export const googleLoginSchema = z
     (data) =>
       Boolean(
         data.credential ||
-        data.id_token ||
-        data.token ||
-        data.access_token ||
-        data.userInfo
+          data.id_token ||
+          data.token ||
+          data.access_token ||
+          data.userInfo
       ),
     {
       message: 'Data otentikasi Google wajib dikirim',
@@ -276,6 +276,7 @@ export const aiAnalysisSchema = z.object({
 
 export const aiChatSchema = z.object({
   message: z.string().min(1, 'Pesan tidak boleh kosong').max(3000, 'Pesan maksimal 3000 karakter'),
+  original_message: z.string().max(3000).optional().nullable(),
   history: z
     .array(
       z.object({
@@ -289,7 +290,9 @@ export const aiChatSchema = z.object({
   role_context: z.enum(['customer', 'mitra', 'store_bot']).optional(),
   store_name: z.string().max(150).optional().nullable(),
   store_user_id: z.union([z.string(), z.number()]).optional().nullable(),
+  target_user_id: z.union([z.string(), z.number()]).optional().nullable(),
   product_name: z.string().max(200).optional().nullable(),
+  save_to_chat: z.boolean().optional(),
 });
 
 // ============================================================

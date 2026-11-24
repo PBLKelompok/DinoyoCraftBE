@@ -1,0 +1,33 @@
+zerops:
+  # Pastikan nama `setup` ini sama persis dengan hostname service Node.js kamu di Zerops
+  - setup: api
+    build:
+      base: nodejs@22
+      buildCommands:
+        - npm ci
+        - npm run build
+        - npm prune --omit=dev
+      deployFiles:
+        - ./dist
+        - ./node_modules
+        - ./package.json
+        - ./uploads/stickers
+        - ./assets
+
+    deploy:
+      readinessCheck:
+        httpGet:
+          port: 5000
+          path: /health
+        failureTimeout: "90s"
+        retryPeriod: "5s"
+
+    run:
+      base: nodejs@22
+      ports:
+        - port: 5000
+          httpSupport: true
+      envVariables:
+        NODE_ENV: production
+        PORT: 5000
+      start: node dist/server.js

@@ -1,19 +1,59 @@
 // ============================================================
 //  src/config/database.ts
-//  Konfigurasi koneksi MySQL dengan connection pool & Sequelize
+//  Konfigurasi koneksi MySQL / TiDB Cloud dengan connection pool & Sequelize
+//  Otomatis mendukung TLS/SSL untuk TiDB Cloud (port 4000 / DB_SSL=true)
 // ============================================================
 
 import mysql from 'mysql2/promise';
 import { Sequelize } from 'sequelize';
+import fs from 'fs';
+import path from 'path';
 import dotenv from 'dotenv';
 
 dotenv.config();
 
-const dbHost = process.env['DB_HOST'] ?? 'localhost';
+const dbHost = (process.env['DB_HOST'] ?? 'localhost').trim();
 const dbPort = Number(process.env['DB_PORT'] ?? 3306);
-const dbUser = process.env['DB_USERNAME'] ?? 'root';
+const dbUser = (process.env['DB_USERNAME'] ?? 'root').trim();
 const dbPassword = process.env['DB_PASSWORD'] ?? '';
-const dbName = process.env['DB_DATABASE'] ?? 'dinoyocraft_db';
+const dbName = (process.env['DB_DATABASE'] ?? 'dinoyocraft_db').trim();
+const connectTimeoutMs = Number(process.env['DB_CONNECT_TIMEOUT_MS'] ?? 20000);
+
+const dbSslFlag = (process.env['DB_SSL'] ?? '').trim().toLowerCase();
+const isTiDbTarget = dbPort === 4000 || dbHost.toLowerCase().includes('tidbcloud.com');
+const useSsl =
+  dbSslFlag === 'true' ||
+  dbSslFlag === '1' ||
+  (dbSslFlag !== 'false' && dbSslFlag !== '0' && isTiDbTarget);
+
+const buildSslOptions = (): Record<string, any> | undefined => {
+  if (!useSsl) return undefined;
+
+  const rejectUnauthorized =
+    (process.env['DB_SSL_REJECT_UNAUTHORIZED'] ?? 'true').trim().toLowerCase() !== 'false';
+  const sslOpts: Record<string, any> = {
+    minVersion: 'TLSv1.2',
+    rejectUnauthorized,
+  };
+
+  const caEnv = (process.env['DB_SSL_CA'] ?? '').trim();
+  if (caEnv) {
+    if (caEnv.includes('-----BEGIN')) {
+      sslOpts['ca'] = caEnv.replace(/\\n/g, '\n');
+    } else {
+      const resolvedCaPath = path.resolve(process.cwd(), caEnv);
+      if (fs.existsSync(resolvedCaPath)) {
+        sslOpts['ca'] = fs.readFileSync(resolvedCaPath, 'utf8');
+      } else {
+        console.warn(`⚠️ [DB SSL] File CA tidak ditemukan di ${resolvedCaPath}, menggunakan CA bawaan sistem.`);
+      }
+    }
+  }
+
+  return sslOpts;
+};
+
+const sslOptions = buildSslOptions();
 
 export const pool = mysql.createPool({
   host: dbHost,
@@ -23,12 +63,15 @@ export const pool = mysql.createPool({
   database: dbName,
   multipleStatements: true,
   waitForConnections: true,
-  connectionLimit: 10,
+  connectionLimit: Number(process.env['DB_CONNECTION_LIMIT'] ?? 10),
   queueLimit: 0,
+  connectTimeout: connectTimeoutMs,
+  idleTimeout: 60000,
   enableKeepAlive: true,
-  keepAliveInitialDelay: 0,
+  keepAliveInitialDelay: 10000,
   charset: 'utf8mb4',
   timezone: '+07:00',
+  ...(sslOptions ? { ssl: sslOptions } : {}),
 });
 
 pool.on('connection', (conn) => {
@@ -41,17 +84,64 @@ export const sequelize = new Sequelize(dbName, dbUser, dbPassword, {
   dialect: 'mysql',
   logging: false,
   timezone: '+07:00',
+  pool: {
+    max: 5,
+    min: 0,
+    idle: 10000,
+    acquire: 30000,
+  },
+  dialectOptions: {
+    connectTimeout: connectTimeoutMs,
+    ...(sslOptions ? { ssl: sslOptions } : {}),
+  },
 });
+
+const ensureDatabaseExists = async (): Promise<void> => {
+  const safeDbName = dbName.replace(/`/g, '');
+  if (!safeDbName) return;
+
+  const bootstrapConn = await mysql.createConnection({
+    host: dbHost,
+    port: dbPort,
+    user: dbUser,
+    password: dbPassword,
+    connectTimeout: connectTimeoutMs,
+    ...(sslOptions ? { ssl: sslOptions } : {}),
+  });
+  try {
+    await bootstrapConn.query(
+      `CREATE DATABASE IF NOT EXISTS \`${safeDbName}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`
+    );
+    console.log(`✅ Database '${safeDbName}' dipastikan tersedia di ${dbHost}:${dbPort}.`);
+  } finally {
+    await bootstrapConn.end();
+  }
+};
 
 export const testConnection = async (): Promise<void> => {
   try {
-    const conn = await pool.getConnection();
-    console.log('✅ MySQL connection established successfully.');
+    let conn;
+    try {
+      conn = await pool.getConnection();
+    } catch (err: any) {
+      // Auto-buat database jika belum dibuat di TiDB Cloud / MySQL baru (ER_BAD_DB_ERROR = 1049)
+      if (err?.errno === 1049 || err?.code === 'ER_BAD_DB_ERROR') {
+        console.log(`ℹ️ Database '${dbName}' belum ada, mencoba membuat otomatis...`);
+        await ensureDatabaseExists();
+        conn = await pool.getConnection();
+      } else {
+        throw err;
+      }
+    }
+
+    console.log(
+      `✅ MySQL/TiDB connection established successfully (${dbHost}:${dbPort}/${dbName}${useSsl ? ', TLS/SSL aktif' : ''}).`
+    );
     conn.release();
     await sequelize.authenticate();
     console.log('✅ Sequelize connection established successfully.');
   } catch (error) {
-    console.error('❌ MySQL connection failed:', error);
+    console.error('❌ MySQL/TiDB connection failed:', error);
     process.exit(1);
   }
 };

@@ -12,13 +12,20 @@ import nodemailer from 'nodemailer';
 export const getTransporter = () => {
   const user = (process.env['EMAIL_USER'] || '').trim();
   const pass = (process.env['EMAIL_PASS'] || '').trim();
+  const host = (process.env['SMTP_HOST'] || 'smtp.gmail.com').trim();
+  const port = Number(process.env['SMTP_PORT'] || 587);
+  const secureEnv = (process.env['SMTP_SECURE'] || '').trim().toLowerCase();
+  const secure = secureEnv ? secureEnv === 'true' : port === 465;
 
   if (!user || !pass) {
     console.error('⚠️ [EMAIL CONFIG] EMAIL_USER atau EMAIL_PASS belum terdefinisi di .env!');
   }
 
   return nodemailer.createTransport({
-    service: 'gmail',
+    host,
+    port,
+    secure,
+    requireTLS: !secure && port === 587,
     auth: {
       user,
       pass,

@@ -10,8 +10,10 @@ import {
 import {
   parseImageUrls,
   parseVariants,
+  resolveCategoryId,
   serializeVariantsInput,
 } from './productController.js';
+import { getUploadedFileUrl } from '../middlewares/uploadMiddleware.js';
 
 export const getDashboardMitra = async (req: Request, res: Response): Promise<void> => {
   try {
@@ -481,14 +483,16 @@ export const updateProduct = async (req: Request, res: Response): Promise<void> 
       updatedStock = stock !== undefined ? Math.max(0, parseInt(stock, 10) || 0) : Number(existingProduct.stock) || 0;
     }
 
-    const updatedCategoryId = category_id !== undefined && String(category_id).trim() !== ''
-      ? Number(category_id) || existingProduct.category_id
-      : existingProduct.category_id;
+    let updatedCategoryId = existingProduct.category_id;
+    if (category_id !== undefined && String(category_id).trim() !== '') {
+      updatedCategoryId = await resolveCategoryId(category_id);
+    }
 
     const uploadedFile = (req as any).file;
+    const uploadedFileUrl = getUploadedFileUrl(uploadedFile);
     const rawImageUrl = typeof (req.body as any)?.image_url === 'string' ? String((req.body as any).image_url).trim() : '';
-    const updatedImageUrlsJson = uploadedFile
-      ? JSON.stringify([`/uploads/${uploadedFile.filename}`])
+    const updatedImageUrlsJson = uploadedFileUrl
+      ? JSON.stringify([uploadedFileUrl])
       : rawImageUrl && (rawImageUrl.startsWith('http://') || rawImageUrl.startsWith('https://'))
       ? JSON.stringify([rawImageUrl])
       : existingProduct.image_urls;

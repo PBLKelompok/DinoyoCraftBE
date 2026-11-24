@@ -4,7 +4,7 @@
 //  Skema Validasi Zod Komprehensif untuk Seluruh REST API DinoyoCraft
 // ============================================================
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.createPaymentSchema = exports.MIDTRANS_PAYMENT_METHODS = exports.handleDeletionActionSchema = exports.handleReportActionSchema = exports.aiAnalysisSchema = exports.verifyMitraStoreSchema = exports.createMasterDataSchema = exports.updateUserStatusSchema = exports.sendMessageSchema = exports.updateProductSchema = exports.createProductSchema = exports.updateProfileSchema = exports.resetPasswordSchema = exports.verifyOtpSchema = exports.forgotPasswordSchema = exports.googleLoginSchema = exports.loginSchema = exports.registerMitraSchema = exports.replyReviewSchema = exports.createReviewSchema = exports.updateOrderStatusSchema = exports.checkoutOrderSchema = exports.checkoutItemSchema = exports.updateCartSchema = exports.addToCartSchema = exports.updateAddressSchema = exports.createAddressSchema = void 0;
+exports.createPaymentSchema = exports.MIDTRANS_PAYMENT_METHODS = exports.handleDeletionActionSchema = exports.handleReportActionSchema = exports.aiChatSchema = exports.aiAnalysisSchema = exports.verifyMitraStoreSchema = exports.createMasterDataSchema = exports.updateUserStatusSchema = exports.sendMessageSchema = exports.updateProductSchema = exports.createProductSchema = exports.verifyTwoFactorOtpSchema = exports.requestTwoFactorOtpSchema = exports.changePasswordSchema = exports.updateProfileSchema = exports.resetPasswordSchema = exports.verifyOtpSchema = exports.forgotPasswordSchema = exports.googleLoginSchema = exports.loginSchema = exports.registerMitraSchema = exports.replyReviewSchema = exports.createReviewSchema = exports.updateOrderStatusSchema = exports.checkoutOrderSchema = exports.checkoutItemSchema = exports.updateCartSchema = exports.addToCartSchema = exports.updateAddressSchema = exports.createAddressSchema = void 0;
 const zod_1 = require("zod");
 // ============================================================
 // 1. Skema Alamat Pengiriman (User Addresses)
@@ -59,11 +59,11 @@ exports.updateOrderStatusSchema = zod_1.z.object({
 // ============================================================
 exports.createReviewSchema = zod_1.z.object({
     product_id: zod_1.z.coerce.number().int().positive('ID produk harus valid'),
-    order_item_id: zod_1.z.coerce.number().int().positive().optional().nullable(),
+    order_item_id: zod_1.z.preprocess((val) => (val === '' || val === null || val === undefined || val === 'null' ? null : val), zod_1.z.coerce.number().int().positive().nullable().optional()),
     rating: zod_1.z.coerce.number().int().min(1, 'Rating minimal 1').max(5, 'Rating maksimal 5'),
     variant: zod_1.z.string().max(100).optional().nullable(),
     comment: zod_1.z.string().max(1000, 'Komentar maksimal 1000 karakter').optional().nullable(),
-    photo_urls: zod_1.z.array(zod_1.z.string()).optional().nullable(),
+    photo_urls: zod_1.z.union([zod_1.z.array(zod_1.z.string()), zod_1.z.string()]).optional().nullable(),
 });
 exports.replyReviewSchema = zod_1.z.object({
     seller_reply: zod_1.z.string().min(1, 'Balasan penjual tidak boleh kosong').max(1000),
@@ -87,19 +87,26 @@ exports.registerMitraSchema = zod_1.z.object({
 exports.loginSchema = zod_1.z.object({
     email: zod_1.z.string().email('Format email tidak valid'),
     password: zod_1.z.string().min(1, 'Password wajib diisi'),
+    portal: zod_1.z.enum(['web', 'mobile']).optional(),
 });
 exports.googleLoginSchema = zod_1.z
     .object({
     credential: zod_1.z.string().optional(),
     id_token: zod_1.z.string().optional(),
     token: zod_1.z.string().optional(),
+    access_token: zod_1.z.string().optional(),
     role: zod_1.z.enum(['pengunjung', 'mitra', 'admin']).optional(),
+    portal: zod_1.z.enum(['web', 'mobile']).optional(),
     userInfo: zod_1.z.record(zod_1.z.string(), zod_1.z.any()).optional(),
     is_register: zod_1.z.boolean().optional(),
     action: zod_1.z.string().optional(),
     phone: zod_1.z.string().optional(),
 })
-    .refine((data) => data.credential || data.id_token || data.token || data.userInfo, {
+    .refine((data) => Boolean(data.credential ||
+    data.id_token ||
+    data.token ||
+    data.access_token ||
+    data.userInfo), {
     message: 'Data otentikasi Google wajib dikirim',
 });
 exports.forgotPasswordSchema = zod_1.z.object({
@@ -115,8 +122,10 @@ exports.resetPasswordSchema = zod_1.z.object({
     otp: zod_1.z.string().optional().nullable(),
 });
 exports.updateProfileSchema = zod_1.z.object({
+    name: zod_1.z.string().optional(),
     ownerName: zod_1.z.string().optional(),
     nama: zod_1.z.string().optional(),
+    username: zod_1.z.string().min(3, 'Username minimal 3 karakter').max(30, 'Username maksimal 30 karakter').regex(/^[a-zA-Z0-9_]+$/, 'Username hanya boleh huruf, angka, dan garis bawah').optional(),
     storeName: zod_1.z.string().optional(),
     nama_toko: zod_1.z.string().optional(),
     phone: zod_1.z.string().optional(),
@@ -135,35 +144,47 @@ exports.updateProfileSchema = zod_1.z.object({
     website: zod_1.z.string().optional().nullable(),
     instagram: zod_1.z.string().optional().nullable(),
 });
+exports.changePasswordSchema = zod_1.z.object({
+    currentPassword: zod_1.z.string().optional().nullable(),
+    newPassword: zod_1.z.string().min(8, 'Kata sandi baru minimal 8 karakter'),
+});
+exports.requestTwoFactorOtpSchema = zod_1.z.object({
+    action: zod_1.z.enum(['enable', 'disable']),
+});
+exports.verifyTwoFactorOtpSchema = zod_1.z.object({
+    action: zod_1.z.enum(['enable', 'disable']),
+    otp: zod_1.z.string().min(4, 'Kode OTP minimal 4 digit').max(10, 'Kode OTP maksimal 10 digit'),
+});
 // ============================================================
 // 6. Skema Katalog Produk (Products)
 // ============================================================
 const parseCategoryInput = (val) => {
-    if (typeof val === 'number')
-        return val;
-    if (typeof val === 'string') {
-        const parsed = parseInt(val, 10);
-        if (!isNaN(parsed) && parsed > 0)
-            return parsed;
-        const lower = val.toLowerCase().trim();
-        if (lower.includes('dekorasi'))
-            return 1;
-        if (lower.includes('makan') || lower.includes('piring') || lower.includes('cangkir') || lower.includes('mangkok'))
-            return 2;
-        if (lower.includes('souvenir'))
-            return 3;
-        if (lower.includes('pot'))
-            return 4;
-        return 1;
+    if (typeof val === 'number' && Number.isFinite(val) && val > 0) {
+        return Math.trunc(val);
     }
-    return 1;
+    if (typeof val === 'string') {
+        const trimmed = val.trim();
+        if (!trimmed)
+            return '';
+        if (/^\d+$/.test(trimmed)) {
+            const parsed = parseInt(trimmed, 10);
+            if (parsed > 0)
+                return parsed;
+        }
+        return trimmed;
+    }
+    return '';
 };
+const categoryFieldSchema = zod_1.z.union([
+    zod_1.z.number().int().positive('Kategori produk wajib diisi'),
+    zod_1.z.string().trim().min(1, 'Kategori produk wajib diisi').max(100),
+]);
 exports.createProductSchema = zod_1.z.object({
     name: zod_1.z.string().min(2, 'Nama produk minimal 2 karakter').max(200),
     description: zod_1.z.string().optional().nullable(),
     price: zod_1.z.coerce.number().min(0, 'Harga produk tidak boleh negatif'),
     stock: zod_1.z.coerce.number().int().min(0, 'Stok produk tidak boleh negatif'),
-    category_id: zod_1.z.preprocess(parseCategoryInput, zod_1.z.number().int().positive('Kategori produk wajib diisi')),
+    category_id: zod_1.z.preprocess(parseCategoryInput, categoryFieldSchema),
     weight_gram: zod_1.z.coerce.number().int().min(1).default(500).optional(),
     variants: zod_1.z.union([zod_1.z.string(), zod_1.z.array(zod_1.z.any())]).optional().nullable(),
     image_url: zod_1.z.string().url('Format URL foto tidak valid').optional().or(zod_1.z.literal('')).nullable(),
@@ -174,7 +195,7 @@ exports.updateProductSchema = zod_1.z.object({
     description: zod_1.z.string().optional().nullable(),
     price: zod_1.z.coerce.number().min(0).optional(),
     stock: zod_1.z.coerce.number().int().min(0).optional(),
-    category_id: zod_1.z.preprocess((val) => (val === undefined || val === null || val === '') ? undefined : parseCategoryInput(val), zod_1.z.number().int().positive().optional()),
+    category_id: zod_1.z.preprocess((val) => (val === undefined || val === null || val === '' ? undefined : parseCategoryInput(val)), categoryFieldSchema.optional()),
     weight_gram: zod_1.z.coerce.number().int().min(1).optional(),
     variants: zod_1.z.union([zod_1.z.string(), zod_1.z.array(zod_1.z.any())]).optional().nullable(),
 });
@@ -184,6 +205,10 @@ exports.updateProductSchema = zod_1.z.object({
 exports.sendMessageSchema = zod_1.z.object({
     message: zod_1.z.string().max(2000, 'Pesan maksimal 2000 karakter').optional().nullable(),
     image_url: zod_1.z.string().optional().nullable(),
+    metadata: zod_1.z.union([zod_1.z.record(zod_1.z.string(), zod_1.z.any()), zod_1.z.string()]).optional().nullable(),
+    targetUserId: zod_1.z.union([zod_1.z.string(), zod_1.z.number()]).optional().nullable(),
+    target_user_id: zod_1.z.union([zod_1.z.string(), zod_1.z.number()]).optional().nullable(),
+    receiver_id: zod_1.z.union([zod_1.z.string(), zod_1.z.number()]).optional().nullable(),
 });
 // ============================================================
 // 8. Skema Administrasi (Admin & Master Data)
@@ -210,6 +235,24 @@ exports.aiAnalysisSchema = zod_1.z.object({
     productCategory: zod_1.z.string().max(100).optional().nullable(),
     targetMarket: zod_1.z.string().max(100).optional().nullable(),
     additionalNotes: zod_1.z.string().max(500).optional().nullable(),
+});
+exports.aiChatSchema = zod_1.z.object({
+    message: zod_1.z.string().min(1, 'Pesan tidak boleh kosong').max(3000, 'Pesan maksimal 3000 karakter'),
+    original_message: zod_1.z.string().max(3000).optional().nullable(),
+    history: zod_1.z
+        .array(zod_1.z.object({
+        role: zod_1.z.enum(['user', 'assistant', 'model']),
+        content: zod_1.z.string().max(3000),
+    }))
+        .max(12)
+        .optional(),
+    locale: zod_1.z.enum(['id', 'en']).optional(),
+    role_context: zod_1.z.enum(['customer', 'mitra', 'store_bot']).optional(),
+    store_name: zod_1.z.string().max(150).optional().nullable(),
+    store_user_id: zod_1.z.union([zod_1.z.string(), zod_1.z.number()]).optional().nullable(),
+    target_user_id: zod_1.z.union([zod_1.z.string(), zod_1.z.number()]).optional().nullable(),
+    product_name: zod_1.z.string().max(200).optional().nullable(),
+    save_to_chat: zod_1.z.boolean().optional(),
 });
 // ============================================================
 // 10. Skema Moderasi & Pengaduan (Moderation)

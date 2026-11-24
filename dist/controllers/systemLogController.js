@@ -37,15 +37,15 @@ const buildLogFilterWhere = (query) => {
     const range = String(query.range || 'live').toLowerCase();
     let rangeLabel = 'live';
     if (range === '24h') {
-        conditions.push('occurred_at >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 24 HOUR)');
+        conditions.push('occurred_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR)');
         rangeLabel = '24-jam';
     }
     else if (range === '7d') {
-        conditions.push('occurred_at >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 7 DAY)');
+        conditions.push('occurred_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)');
         rangeLabel = '7-hari';
     }
     else if (range === '30d' || range === '1m') {
-        conditions.push('occurred_at >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 30 DAY)');
+        conditions.push('occurred_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)');
         rangeLabel = '1-bulan';
     }
     else if (range === 'custom') {
@@ -315,7 +315,7 @@ const getSystemLogsSummary = async (req, res) => {
        WHERE deleted_at IS NULL
          AND acknowledged_at IS NULL
          AND severity IN ('critical', 'error')
-         AND occurred_at >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 15 MINUTE)`);
+         AND occurred_at >= DATE_SUB(NOW(), INTERVAL 15 MINUTE)`);
         const [deletedCountRows] = await database_js_1.default.query(`SELECT COUNT(*) AS total
        FROM system_logs
        WHERE deleted_at IS NOT NULL`);
@@ -455,7 +455,7 @@ const acknowledgeSystemLog = async (req, res) => {
         const { eventId } = req.params;
         const adminId = req.user?.id || res.locals['userId'] || 1;
         const [result] = await database_js_1.default.query(`UPDATE system_logs
-       SET acknowledged_at = UTC_TIMESTAMP(), acknowledged_by = ?
+       SET acknowledged_at = NOW(), acknowledged_by = ?
        WHERE event_id = ?`, [adminId, eventId]);
         if (!result?.affectedRows) {
             res.status(404).json({ success: false, message: 'Log tidak ditemukan' });
@@ -612,7 +612,7 @@ const softDeleteSystemLog = async (req, res) => {
             return;
         }
         await database_js_1.default.query(`UPDATE system_logs
-       SET deleted_at = UTC_TIMESTAMP(), deleted_by = ?, delete_reason = ?
+       SET deleted_at = NOW(), deleted_by = ?, delete_reason = ?
        WHERE event_id = ?`, [adminId, String(reason).slice(0, 250), eventId]);
         await (0, loggingService_js_1.logSystemEvent)({
             category: 'admin_audit',
@@ -657,7 +657,7 @@ const bulkDeleteSystemLogs = async (req, res) => {
             }
             const placeholders = eventIds.map(() => '?').join(',');
             const [result] = await database_js_1.default.query(`UPDATE system_logs
-         SET deleted_at = UTC_TIMESTAMP(), deleted_by = ?, delete_reason = ?
+         SET deleted_at = NOW(), deleted_by = ?, delete_reason = ?
          WHERE event_id IN (${placeholders})
            AND category != 'admin_audit'
            AND deleted_at IS NULL`, [adminId, String(reason).slice(0, 250), ...eventIds]);
@@ -669,7 +669,7 @@ const bulkDeleteSystemLogs = async (req, res) => {
                 ? `${whereSql} AND category != 'admin_audit'`
                 : `WHERE deleted_at IS NULL AND category != 'admin_audit'`;
             const [result] = await database_js_1.default.query(`UPDATE system_logs
-         SET deleted_at = UTC_TIMESTAMP(), deleted_by = ?, delete_reason = ?
+         SET deleted_at = NOW(), deleted_by = ?, delete_reason = ?
          ${extraRule}`, [adminId, String(reason).slice(0, 250), ...params]);
             affectedCount = Number(result?.affectedRows || 0);
         }

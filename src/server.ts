@@ -5,7 +5,7 @@ import 'dotenv/config';
 // ============================================================
 
 import app from './app.js';
-import { testConnection } from './config/database.js';
+import { pool, sequelize, testConnection } from './config/database.js';
 import AiSetting from './models/AiSetting.js';
 import { startPaymentPoller } from './services/paymentPoller.js';
 import { ensureSystemLogsSchema, logSystemEvent } from './services/loggingService.js';
@@ -57,6 +57,30 @@ const startServer = async (): Promise<void> => {
   server.on('error', (err: any) => {
     console.error('❌ Server HTTP error:', err);
   });
+
+  let shuttingDown = false;
+  const gracefulShutdown = (signal: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`🛑 Received ${signal}, shutting down gracefully...`);
+
+    const forceExitTimer = setTimeout(() => {
+      console.warn('⚠️ Shutdown timeout reached, forcing exit.');
+      process.exit(1);
+    }, 10_000);
+    forceExitTimer.unref?.();
+
+    server.close(async () => {
+      try {
+        await Promise.allSettled([pool.end(), sequelize.close()]);
+      } finally {
+        process.exit(0);
+      }
+    });
+  };
+
+  process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+  process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 };
 
 // Handle unhandled promise rejections
@@ -76,7 +100,7 @@ process.on('unhandledRejection', (reason: unknown) => {
       message: reason instanceof Error ? reason.message : String(reason),
       stack: reason instanceof Error ? reason.stack : null,
     },
-  }).catch(() => { });
+  }).catch(() => {});
 });
 
 // Handle uncaught exceptions
@@ -96,16 +120,11 @@ process.on('uncaughtException', (err: Error) => {
       message: err.message,
       stack: err.stack || null,
     },
-  }).catch(() => { });
+  }).catch(() => {});
 });
 
 process.on('exit', (code: number) => {
   console.log(`🛑 Node process exited with code: ${code}`);
-});
-
-process.on('SIGINT', () => {
-  console.log('🛑 Received SIGINT, shutting down gracefully...');
-  process.exit(0);
 });
 
 startServer().catch((err: unknown) => {

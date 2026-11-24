@@ -8,7 +8,7 @@ export interface WalletSummary {
     withdrawal_fee: number;
 }
 /** Ringkasan saldo mitra berdasarkan pesanan selesai & riwayat penarikan. */
-export declare function getWalletSummary(mitraId: number): Promise<WalletSummary>;
+export declare function getWalletSummary(mitraId: number, conn?: any): Promise<WalletSummary>;
 /**
  * Data grafik mingguan pendapatan mitra (7 hari terakhir).
  * Hasil query diagregasi per hari dan diparsing ke tipe Number asli

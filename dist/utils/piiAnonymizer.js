@@ -30,11 +30,6 @@ const PII_PATTERNS = [
         pattern: /\b(?:nik|ktp|nip|nim)\s*:?\s*\d{8,16}/gi,
         replacement: '[ID_DIREDAKSI]',
     },
-    // Nama lengkap (heuristik: 2-4 kata diawali huruf kapital)
-    {
-        pattern: /\b([A-Z][a-z]{1,20})\s([A-Z][a-z]{1,20})(?:\s([A-Z][a-z]{1,20}))?(?:\s([A-Z][a-z]{1,20}))?\b/g,
-        replacement: '[NAMA_DIREDAKSI]',
-    },
     // Alamat (mengandung kata jl, jalan, rt, rw, dsb.)
     {
         pattern: /(?:jl\.|jalan|gg\.|gang|rt|rw|no\.|nomor)\s+[^\n,]{3,50}/gi,

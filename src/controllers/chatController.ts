@@ -3,6 +3,7 @@ import pool from '../config/database.js';
 import pusher, { isPusherAvailable } from '../utils/pusher.js';
 import { encryptMessage, decryptMessage } from '../utils/encryption.js';
 import { sendPushNotificationToUser } from '../services/notificationService.js';
+import { getUploadedFileUrl } from '../middlewares/uploadMiddleware.js';
 
 /**
  * Memperbarui timestamp aktivitas terakhir user di database (last_seen_at)
@@ -99,7 +100,7 @@ export const sendMessage = async (req: Request, res: Response): Promise<void> =>
     const reqFiles = (req as any).files;
     const reqFile = (req as any).file;
     if (reqFile) {
-      imageUrl = `/uploads/${reqFile.filename}`;
+      imageUrl = getUploadedFileUrl(reqFile);
     } else if (Array.isArray(reqFiles) && reqFiles.length > 0) {
       const imgFile =
         reqFiles.find(
@@ -109,7 +110,7 @@ export const sendMessage = async (req: Request, res: Response): Promise<void> =>
             f.fieldname === 'attachment'
         ) || reqFiles[0];
       if (imgFile) {
-        imageUrl = `/uploads/${imgFile.filename}`;
+        imageUrl = getUploadedFileUrl(imgFile);
       }
     } else if (
       req.body['image_url'] &&
@@ -154,7 +155,7 @@ export const sendMessage = async (req: Request, res: Response): Promise<void> =>
       }
     }
 
-    let resolveSubmission: (val: any) => void = () => { };
+    let resolveSubmission: (val: any) => void = () => {};
     const submissionPromise = new Promise((resolve) => {
       resolveSubmission = resolve;
     });
@@ -243,13 +244,16 @@ export const sendMessage = async (req: Request, res: Response): Promise<void> =>
     const userTargetChannel = `user-${numericTargetId}`;
     const userSenderChannel = `user-${numericSenderId}`;
 
-    const msgType = parsedMetadata
-      ? String(parsedMetadata.context_type || 'context')
+    const isAiMsg = Boolean(parsedMetadata?.is_ai);
+    const msgType = parsedMetadata?.context_type
+      ? String(parsedMetadata.context_type)
+      : isAiMsg
+      ? 'ai_reply'
       : imageUrl && imageUrl.includes('sticker')
-        ? 'sticker'
-        : imageUrl
-          ? 'image'
-          : 'text';
+      ? 'sticker'
+      : imageUrl
+      ? 'image'
+      : 'text';
 
     if (isPusherAvailable()) {
       console.log(`[Pusher Backend] Triggering event 'new-message' on channels:`, [
@@ -371,9 +375,9 @@ export const getMessages = async (req: Request, res: Response): Promise<void> =>
     const targetUser = targetRows?.[0] || null;
     const targetIsOnline = targetUser
       ? Boolean(
-        targetUser.is_online ||
-        (targetUser.last_seen_at && (Date.now() - new Date(targetUser.last_seen_at).getTime() <= 2 * 60 * 1000))
-      )
+          targetUser.is_online ||
+          (targetUser.last_seen_at && (Date.now() - new Date(targetUser.last_seen_at).getTime() <= 2 * 60 * 1000))
+        )
       : false;
 
     const [messages]: any = await pool.query(
@@ -391,18 +395,23 @@ export const getMessages = async (req: Request, res: Response): Promise<void> =>
         imgUrl = `/uploads/stickers/${imgUrl.replace('assets/stickers/', '')}`;
       }
       const parsedMeta = parseMessageMetadata(msg.metadata);
-      const msgType = parsedMeta
-        ? String(parsedMeta.context_type || 'context')
+      const isAiMsg = Boolean(parsedMeta?.is_ai);
+      const msgType = parsedMeta?.context_type
+        ? String(parsedMeta.context_type)
+        : isAiMsg
+        ? 'ai_reply'
         : imgUrl && imgUrl.includes('sticker')
-          ? 'sticker'
-          : imgUrl
-            ? 'image'
-            : 'text';
+        ? 'sticker'
+        : imgUrl
+        ? 'image'
+        : 'text';
       return {
         ...msg,
         message: decryptMessage(msg.message || ''),
         image_url: imgUrl,
         metadata: parsedMeta,
+        is_ai: isAiMsg,
+        sender_type: isAiMsg ? String(parsedMeta?.sender_type || 'store_bot') : undefined,
         type: msgType,
       };
     });
@@ -571,6 +580,7 @@ export const getChatContacts = async (req: Request, res: Response): Promise<void
         last_message: preview || contact.last_message || null,
         last_image_url: contact.last_image_url || null,
         last_metadata: lastMeta,
+        last_message_is_ai: Boolean(lastMeta?.is_ai),
       };
     });
 
