@@ -6,6 +6,7 @@
 import { Request, Response } from 'express';
 import bcrypt from 'bcryptjs';
 import pool from '../config/database.js';
+import { invalidateUserAuthCache } from '../middlewares/authMiddleware.js';
 
 let tablesInitialized = false;
 let initTablesPromise: Promise<void> | null = null;
@@ -373,11 +374,13 @@ export const handleDeletionAction = async (req: Request, res: Response): Promise
           'UPDATE users SET is_active = 0, token_version = token_version + 1 WHERE id = ?',
           [delReq.user_id]
         );
+        invalidateUserAuthCache(Number(delReq.user_id));
       } else if (delReq.email) {
         await pool.query(
           'UPDATE users SET is_active = 0, token_version = token_version + 1 WHERE email = ?',
           [delReq.email]
         );
+        invalidateUserAuthCache();
       }
     }
 

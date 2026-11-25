@@ -7,7 +7,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.getAuthLocals = exports.isAdmin = exports.requireRole = exports.optionalVerifyToken = exports.verifyToken = void 0;
+exports.getAuthLocals = exports.isAdmin = exports.requireRole = exports.optionalVerifyToken = exports.verifyToken = exports.invalidateUserAuthCache = void 0;
 const jsonwebtoken_1 = __importDefault(require("jsonwebtoken"));
 const response_js_1 = require("../utils/response.js");
 const database_1 = __importDefault(require("../config/database"));
@@ -15,6 +15,40 @@ const JWT_SECRET = process.env['JWT_SECRET'];
 if (!JWT_SECRET) {
     throw new Error('❌ JWT_SECRET tidak ditemukan di environment variables!');
 }
+const AUTH_CACHE_TTL_MS = 15_000;
+const userAuthCache = new Map();
+const invalidateUserAuthCache = (userId) => {
+    if (typeof userId === 'number' && userId > 0) {
+        userAuthCache.delete(userId);
+    }
+    else {
+        userAuthCache.clear();
+    }
+};
+exports.invalidateUserAuthCache = invalidateUserAuthCache;
+const getAuthUserState = async (userId) => {
+    const now = Date.now();
+    const cached = userAuthCache.get(userId);
+    if (cached && cached.expiresAt > now) {
+        return cached;
+    }
+    const [rows] = (await database_1.default.query('SELECT token_version, is_active FROM users WHERE id = ? LIMIT 1', [userId]));
+    const dbUser = rows?.[0];
+    if (!dbUser) {
+        userAuthCache.delete(userId);
+        return null;
+    }
+    const entry = {
+        token_version: Number(dbUser.token_version ?? 0),
+        is_active: Number(dbUser.is_active ?? 1),
+        expiresAt: now + AUTH_CACHE_TTL_MS,
+    };
+    if (userAuthCache.size > 2000) {
+        userAuthCache.clear();
+    }
+    userAuthCache.set(userId, entry);
+    return entry;
+};
 /**
  * verifyToken
  * Mengekstrak Bearer token dari header Authorization,
@@ -44,10 +78,7 @@ const verifyToken = async (req, res, next) => {
     }
     try {
         const decoded = jsonwebtoken_1.default.verify(token, JWT_SECRET);
-        // Cek versi token: bila sesi dicabut dari perangkat lain (token_version
-        // dinaikkan via force-logout), semua token lama langsung ditolak.
-        const [rows] = (await database_1.default.query('SELECT token_version, is_active FROM users WHERE id = ? LIMIT 1', [decoded.userId]));
-        const dbUser = rows?.[0];
+        const dbUser = await getAuthUserState(decoded.userId);
         if (!dbUser) {
             (0, response_js_1.sendUnauthorized)(res, 'Pengguna tidak ditemukan. Silakan login ulang.');
             return;
@@ -109,8 +140,7 @@ const optionalVerifyToken = async (req, res, next) => {
     }
     try {
         const decoded = jsonwebtoken_1.default.verify(token, JWT_SECRET);
-        const [rows] = (await database_1.default.query('SELECT token_version, is_active FROM users WHERE id = ? LIMIT 1', [decoded.userId]));
-        const dbUser = rows?.[0];
+        const dbUser = await getAuthUserState(decoded.userId);
         if (dbUser && dbUser.is_active !== 0 && (decoded.ver ?? 0) === dbUser.token_version) {
             res.locals['userId'] = decoded.userId;
             res.locals['email'] = decoded.email;

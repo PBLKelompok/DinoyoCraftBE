@@ -791,10 +791,24 @@ exports.logSystemEvent = logSystemEvent;
 const logHttpRequest = (req, res, durationMs) => {
     const rawPath = req.originalUrl || req.url || req.path || '/';
     const cleanPath = rawPath.split('?')[0] || '/';
-    // Abaikan health check, endpoint polling log admin, serta aset statis sukses agar stream tetap bersih
+    // Abaikan preflight, health check, endpoint polling rutin sukses, serta aset statis agar tidak memicu Pusher loop
+    if (req.method === 'OPTIONS' || req.method === 'HEAD')
+        return;
     if (cleanPath === '/health' || cleanPath === '/api/health')
         return;
+    if (cleanPath === '/api/chat/heartbeat' && res.statusCode < 400)
+        return;
     if (req.method === 'GET' && cleanPath.startsWith('/api/admin/logs') && !cleanPath.endsWith('/export')) {
+        return;
+    }
+    if (req.method === 'GET' &&
+        res.statusCode < 400 &&
+        !res.locals['logEventName'] &&
+        (cleanPath.startsWith('/api/admin/') ||
+            cleanPath.startsWith('/api/mitra/') ||
+            cleanPath.startsWith('/api/chat/') ||
+            cleanPath === '/api/auth/profile' ||
+            cleanPath.startsWith('/api/products'))) {
         return;
     }
     if (res.statusCode < 500 &&

@@ -16,62 +16,68 @@ const getDashboardMitra = async (req, res) => {
             res.status(401).json({ success: false, message: 'Autentikasi gagal. User tidak ditemukan.' });
             return;
         }
-        // 2. Cari profil mitra berdasarkan user_id
-        const [mitraRows] = await database_js_1.default.query('SELECT id, user_id, store_name FROM mitra_profiles WHERE user_id = ? LIMIT 1', [userId]);
-        const [userRows] = await database_js_1.default.query('SELECT id, name FROM users WHERE id = ? LIMIT 1', [userId]);
+        // 2. Cari profil mitra & user secara paralel
+        const [[mitraRows], [userRows]] = await Promise.all([
+            database_js_1.default.query('SELECT id, user_id, store_name FROM mitra_profiles WHERE user_id = ? LIMIT 1', [userId]),
+            database_js_1.default.query('SELECT id, name FROM users WHERE id = ? LIMIT 1', [userId]),
+        ]);
         const userName = userRows && userRows.length > 0 ? userRows[0].name : 'Mitra';
         const mitra = mitraRows && mitraRows.length > 0 ? mitraRows[0] : null;
         const mitraId = mitra ? mitra.id : null;
         const storeName = mitra?.store_name || userName;
-        // 3. Hitung Produk Aktif dari tabel products
         let totalProducts = 0;
-        if (mitraId) {
-            const [productCountRows] = await database_js_1.default.query('SELECT COUNT(*) AS total FROM products WHERE mitra_id = ? AND (is_deleted = 0 OR is_deleted IS NULL)', [mitraId]);
-            totalProducts = Number(productCountRows[0]?.total || 0);
-        }
-        // 4. Hitung Pesanan dan Saldo dari tabel orders
         let totalOrders = 0;
         let activeBalance = 0;
+        let kunjunganProfil = 0;
         let recentOrdersFormatted = [];
         if (mitraId) {
-            // Hitung total pesanan
-            const [orderCountRows] = await database_js_1.default.query('SELECT COUNT(*) AS total FROM orders WHERE mitra_id = ?', [mitraId]);
-            totalOrders = Number(orderCountRows[0]?.total || 0);
-            // Hitung Saldo Aktif dari wallet ledger (hanya pesanan selesai dikurangi penarikan)
-            const wallet = await (0, walletService_js_1.getWalletSummary)(mitraId);
-            activeBalance = wallet.saldo_tersedia;
-            // Query pesanan terbaru
-            const [orderRows] = await database_js_1.default.query(`SELECT 
-          o.id,
-          o.created_at,
-          o.status,
-          COALESCE(u.name, 'Pembeli') AS customer_name,
-          COALESCE((SELECT SUM(oi.quantity) FROM order_items oi WHERE oi.order_id = o.id), 1) AS total_items
-        FROM orders o
-        LEFT JOIN users u ON o.user_id = u.id
-        WHERE o.mitra_id = ?
-        ORDER BY o.created_at DESC
-        LIMIT 5`, [mitraId]);
+            const [[productCountRows], [orderCountRows], wallet, [orderRows], [visitorRows],] = await Promise.all([
+                database_js_1.default.query('SELECT COUNT(*) AS total FROM products WHERE mitra_id = ? AND (is_deleted = 0 OR is_deleted IS NULL)', [mitraId]),
+                database_js_1.default.query('SELECT COUNT(*) AS total FROM orders WHERE mitra_id = ?', [mitraId]),
+                (0, walletService_js_1.getWalletSummary)(mitraId),
+                database_js_1.default.query(`SELECT 
+            o.id,
+            o.created_at,
+            o.status,
+            COALESCE(u.name, 'Pembeli') AS customer_name,
+            COALESCE((SELECT SUM(oi.quantity) FROM order_items oi WHERE oi.order_id = o.id), 1) AS total_items
+          FROM orders o
+          LEFT JOIN users u ON o.user_id = u.id
+          WHERE o.mitra_id = ?
+          ORDER BY o.created_at DESC
+          LIMIT 5`, [mitraId]),
+                database_js_1.default
+                    .query(`SELECT COUNT(DISTINCT visitor_id) AS total FROM (
+              SELECT user_id AS visitor_id FROM orders WHERE mitra_id = ? AND user_id IS NOT NULL AND user_id != ?
+              UNION
+              SELECT sender_id AS visitor_id FROM messages WHERE receiver_id = ? AND sender_id IS NOT NULL AND sender_id != ?
+            ) AS store_visitors`, [mitraId, userId, userId, userId])
+                    .catch(() => [[{ total: 0 }]]),
+            ]);
+            totalProducts = Number(productCountRows?.[0]?.total || 0);
+            totalOrders = Number(orderCountRows?.[0]?.total || 0);
+            activeBalance = Number(wallet?.saldo_tersedia || 0);
+            kunjunganProfil = Number(visitorRows?.[0]?.total || 0);
             const statusMap = {
                 pending: 'Menunggu Pembayaran',
                 paid: 'Perlu Diproses',
                 packed: 'Sedang Dikemas',
                 shipped: 'Sedang Dikirim',
                 completed: 'Selesai',
-                cancelled: 'Dibatalkan'
+                cancelled: 'Dibatalkan',
             };
-            recentOrdersFormatted = orderRows.map((item) => {
+            recentOrdersFormatted = (orderRows || []).map((item) => {
                 const orderDate = item.created_at ? new Date(item.created_at) : new Date();
                 const dateStr = orderDate.toISOString().split('T')[0].replace(/-/g, '');
                 return {
                     id: `ORD-${dateStr}-00${item.id}`,
                     items: Number(item.total_items || 1),
                     customer: item.customer_name,
-                    status: statusMap[item.status] || item.status || 'Perlu Diproses'
+                    status: statusMap[item.status] || item.status || 'Perlu Diproses',
                 };
             });
         }
-        // 5. Susun respons JSON yang siap di-consume frontend
+        // 5. Susun respons JSON yang siap di-consume frontend (tanpa angka dummy)
         res.status(200).json({
             success: true,
             data: {
@@ -80,10 +86,10 @@ const getDashboardMitra = async (req, res) => {
                     totalPesanan: totalOrders,
                     produkAktif: totalProducts,
                     saldoAktif: activeBalance,
-                    kunjunganProfil: 342
+                    kunjunganProfil,
                 },
-                recentOrders: recentOrdersFormatted
-            }
+                recentOrders: recentOrdersFormatted,
+            },
         });
     }
     catch (error) {

@@ -24,64 +24,66 @@ const sanitizeUser = (user) => {
  */
 const getDashboardStats = async (_req, res) => {
     try {
-        // 1. Toko Pengrajin Aktif (Terverifikasi & Aktif)
-        const [tokoAktifRows] = await database_js_1.default.execute('SELECT COUNT(*) AS total FROM mitra_profiles WHERE is_verified = 1 AND is_active = 1');
+        const [[tokoAktifRows], [tokoPendingRows], [orderStatsRows], [userCountRows], [latestOrders],] = await Promise.all([
+            database_js_1.default.execute('SELECT COUNT(*) AS total FROM mitra_profiles WHERE is_verified = 1 AND is_active = 1'),
+            database_js_1.default.execute('SELECT COUNT(*) AS total FROM mitra_profiles WHERE is_verified = 0'),
+            database_js_1.default.execute(`SELECT 
+          COUNT(*) AS totalTransaksi,
+          COALESCE(SUM(total_amount), 0) AS totalOmzet
+         FROM orders
+         WHERE status != 'cancelled'`),
+            database_js_1.default.execute(`SELECT COUNT(*) AS total FROM users WHERE role = 'pengunjung'`),
+            database_js_1.default.execute(`SELECT 
+          CONCAT('INV/', DATE_FORMAT(o.created_at, '%Y/%m/'), LPAD(o.id, 4, '0')) AS id,
+          COALESCE(m.store_name, 'Toko Mitra') AS toko,
+          CAST(o.total_amount AS UNSIGNED) AS nominal
+         FROM orders o
+         LEFT JOIN mitra_profiles m ON o.mitra_id = m.id
+         ORDER BY o.created_at DESC
+         LIMIT 5`),
+        ]);
         const tokoPengrajinAktif = Number(tokoAktifRows[0]?.total ?? 0);
-        // 2. Pengajuan Toko Baru (Menunggu Verifikasi)
-        const [tokoPendingRows] = await database_js_1.default.execute('SELECT COUNT(*) AS total FROM mitra_profiles WHERE is_verified = 0');
         const pengajuanTokoBaru = Number(tokoPendingRows[0]?.total ?? 0);
-        // 3. Total Transaksi & Omzet dari tabel orders (dan fallback transactions jika ada)
-        const [orderStatsRows] = await database_js_1.default.execute(`SELECT 
-        COUNT(*) AS totalTransaksi,
-        COALESCE(SUM(total_amount), 0) AS totalOmzet
-       FROM orders
-       WHERE status != 'cancelled'`);
         let totalTransaksi = Number(orderStatsRows[0]?.totalTransaksi ?? 0);
         let totalOmzet = Number(orderStatsRows[0]?.totalOmzet ?? 0);
-        // Jika orders kosong, periksa tabel transactions
-        if (totalTransaksi === 0) {
-            const [trxStatsRows] = await database_js_1.default.execute(`SELECT 
-          COUNT(*) AS totalTransaksi,
-          COALESCE(SUM(amount), 0) AS totalOmzet
-         FROM transactions
-         WHERE status = 'success'`);
-            totalTransaksi = Number(trxStatsRows[0]?.totalTransaksi ?? 0);
-            totalOmzet = Number(trxStatsRows[0]?.totalOmzet ?? 0);
-        }
-        // 4. Kunjungan Wisatawan (Total pengunjung unik dari log / pembeli)
-        const [visitorRows] = await database_js_1.default.execute(`SELECT COUNT(DISTINCT ip_address) AS total FROM audit_logs WHERE ip_address IS NOT NULL`);
-        let kunjunganWisatawan = Number(visitorRows[0]?.total ?? 0);
-        if (kunjunganWisatawan === 0) {
-            const [userCountRows] = await database_js_1.default.execute(`SELECT COUNT(*) AS total FROM users WHERE role = 'pengunjung'`);
-            kunjunganWisatawan = Number(userCountRows[0]?.total ?? 0);
-        }
-        // 5. Transaksi Terbaru
-        const [latestOrders] = await database_js_1.default.execute(`SELECT 
-        CONCAT('INV/', DATE_FORMAT(o.created_at, '%Y/%m/'), LPAD(o.id, 4, '0')) AS id,
-        COALESCE(m.store_name, 'Toko Mitra') AS toko,
-        CAST(o.total_amount AS UNSIGNED) AS nominal
-       FROM orders o
-       LEFT JOIN mitra_profiles m ON o.mitra_id = m.id
-       ORDER BY o.created_at DESC
-       LIMIT 5`);
+        // Kunjungan wisatawan riil dari akun pengunjung terdaftar (bukan IP scanner/bot dari audit_logs)
+        const kunjunganWisatawan = Number(userCountRows[0]?.total ?? 0);
         let transaksiTerbaru = (latestOrders || []).map((row) => ({
             id: String(row.id),
             toko: String(row.toko),
-            nominal: Number(row.nominal || 0)
+            nominal: Number(row.nominal || 0),
         }));
-        if (transaksiTerbaru.length === 0) {
-            const [latestTransactions] = await database_js_1.default.execute(`SELECT 
-          COALESCE(t.reference_code, CONCAT('TRX/', DATE_FORMAT(t.created_at, '%Y/%m/'), LPAD(t.id, 4, '0'))) AS id,
-          'Transaksi Platform' AS toko,
-          CAST(t.amount AS UNSIGNED) AS nominal
-         FROM transactions t
-         ORDER BY t.created_at DESC
-         LIMIT 5`);
-            transaksiTerbaru = (latestTransactions || []).map((row) => ({
-                id: String(row.id),
-                toko: String(row.toko),
-                nominal: Number(row.nominal || 0)
-            }));
+        // Fallback ke tabel transactions jika tabel orders masih kosong
+        if (totalTransaksi === 0 || transaksiTerbaru.length === 0) {
+            const [trxStatsRes, latestTrxRes] = await Promise.all([
+                totalTransaksi === 0
+                    ? database_js_1.default.execute(`SELECT 
+                COUNT(*) AS totalTransaksi,
+                COALESCE(SUM(amount), 0) AS totalOmzet
+               FROM transactions
+               WHERE status = 'success'`).catch(() => [[]])
+                    : Promise.resolve([[]]),
+                transaksiTerbaru.length === 0
+                    ? database_js_1.default.execute(`SELECT 
+                COALESCE(t.reference_code, CONCAT('TRX/', DATE_FORMAT(t.created_at, '%Y/%m/'), LPAD(t.id, 4, '0'))) AS id,
+                'Transaksi Platform' AS toko,
+                CAST(t.amount AS UNSIGNED) AS nominal
+               FROM transactions t
+               ORDER BY t.created_at DESC
+               LIMIT 5`).catch(() => [[]])
+                    : Promise.resolve([[]]),
+            ]);
+            if (totalTransaksi === 0 && trxStatsRes[0]?.[0]) {
+                totalTransaksi = Number(trxStatsRes[0][0]?.totalTransaksi ?? 0);
+                totalOmzet = Number(trxStatsRes[0][0]?.totalOmzet ?? 0);
+            }
+            if (transaksiTerbaru.length === 0 && Array.isArray(latestTrxRes[0]) && latestTrxRes[0].length > 0) {
+                transaksiTerbaru = latestTrxRes[0].map((row) => ({
+                    id: String(row.id),
+                    toko: String(row.toko),
+                    nominal: Number(row.nominal || 0),
+                }));
+            }
         }
         const dashboardData = {
             totalTransaksi,
@@ -89,11 +91,11 @@ const getDashboardStats = async (_req, res) => {
             kunjunganWisatawan,
             tokoPengrajinAktif,
             pengajuanTokoBaru,
-            transaksiTerbaru
+            transaksiTerbaru,
         };
         res.status(200).json({
             success: true,
-            data: dashboardData
+            data: dashboardData,
         });
     }
     catch (error) {
@@ -140,6 +142,7 @@ const updateUserStatus = async (req, res) => {
             (0, response_js_1.sendNotFound)(res, 'Pengguna tidak ditemukan.');
             return;
         }
+        (0, authMiddleware_js_1.invalidateUserAuthCache)(userId);
         (0, response_js_1.sendSuccess)(res, { userId, is_active }, 'Status pengguna berhasil diperbarui.');
     }
     catch (err) {
@@ -160,6 +163,7 @@ const forceLogoutUser = async (req, res) => {
             (0, response_js_1.sendNotFound)(res, 'Pengguna tidak ditemukan.');
             return;
         }
+        (0, authMiddleware_js_1.invalidateUserAuthCache)(userId);
         (0, response_js_1.sendSuccess)(res, { userId }, 'Sesi pengguna telah diakhiri dari semua perangkat.');
     }
     catch (err) {
@@ -270,6 +274,7 @@ const verifyMitraStore = async (req, res) => {
         await database_js_1.default.execute('UPDATE mitra_profiles SET is_verified = ?, is_active = 1, rejection_reason = ?, updated_at = NOW() WHERE id = ?', [isVerifiedVal, rejectionReason, mitraId]);
         // Update status akun user di tabel users (tetap aktif agar bisa login & melengkapi dokumen)
         await database_js_1.default.execute('UPDATE users SET is_active = 1, updated_at = NOW() WHERE id = ?', [userId]);
+        (0, authMiddleware_js_1.invalidateUserAuthCache)(Number(userId));
         // Simpan notifikasi in-app untuk Mitra
         await database_js_1.default
             .execute(`INSERT INTO notifications (user_id, title, message, type, reference_id)

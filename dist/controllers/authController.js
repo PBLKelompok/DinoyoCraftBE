@@ -10,6 +10,7 @@ const jsonwebtoken_1 = __importDefault(require("jsonwebtoken"));
 const google_auth_library_1 = require("google-auth-library");
 const database_1 = __importDefault(require("../config/database"));
 const uploadMiddleware_js_1 = require("../middlewares/uploadMiddleware.js");
+const authMiddleware_js_1 = require("../middlewares/authMiddleware.js");
 const signTokenPair = (user) => {
     const jwtSecret = process.env['JWT_SECRET'];
     if (!jwtSecret)
@@ -1388,6 +1389,7 @@ const resetPassword = async (req, res) => {
         const targetUserId = Number(users[0].id);
         const passwordHash = await bcryptjs_1.default.hash(newPassword, 10);
         await database_1.default.query('UPDATE users SET password_hash = ?, password_changed_at = NOW(), token_version = token_version + 1 WHERE id = ?', [passwordHash, targetUserId]);
+        (0, authMiddleware_js_1.invalidateUserAuthCache)(targetUserId);
         await database_1.default.query("UPDATE user_otps SET is_used = 1 WHERE user_id = ? AND otp_type = 'reset_password' AND is_used = 0", [targetUserId]);
         if (matchedDbOtpId) {
             await database_1.default.query('UPDATE user_otps SET is_used = 1 WHERE id = ?', [matchedDbOtpId]);
@@ -2025,6 +2027,7 @@ const logoutOtherDevices = async (_req, res) => {
             return;
         }
         await database_1.default.query('UPDATE users SET token_version = token_version + 1 WHERE id = ?', [userId]);
+        (0, authMiddleware_js_1.invalidateUserAuthCache)(Number(userId));
         const [users] = await database_1.default.query('SELECT id, email, role, token_version FROM users WHERE id = ? LIMIT 1', [userId]);
         if (!users || users.length === 0) {
             res.status(404).json({ success: false, message: 'Pengguna tidak ditemukan.' });

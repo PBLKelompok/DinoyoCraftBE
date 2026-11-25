@@ -14,6 +14,52 @@ if (!JWT_SECRET) {
   throw new Error('❌ JWT_SECRET tidak ditemukan di environment variables!');
 }
 
+// Cache singkat (15 detik) status user agar polling dashboard tidak membanjiri koneksi TiDB Cloud
+interface CachedAuthUser {
+  token_version: number;
+  is_active: number;
+  expiresAt: number;
+}
+const AUTH_CACHE_TTL_MS = 15_000;
+const userAuthCache = new Map<number, CachedAuthUser>();
+
+export const invalidateUserAuthCache = (userId?: number): void => {
+  if (typeof userId === 'number' && userId > 0) {
+    userAuthCache.delete(userId);
+  } else {
+    userAuthCache.clear();
+  }
+};
+
+const getAuthUserState = async (userId: number): Promise<CachedAuthUser | null> => {
+  const now = Date.now();
+  const cached = userAuthCache.get(userId);
+  if (cached && cached.expiresAt > now) {
+    return cached;
+  }
+
+  const [rows] = (await db.query(
+    'SELECT token_version, is_active FROM users WHERE id = ? LIMIT 1',
+    [userId]
+  )) as [any[], unknown];
+  const dbUser = rows?.[0];
+  if (!dbUser) {
+    userAuthCache.delete(userId);
+    return null;
+  }
+
+  const entry: CachedAuthUser = {
+    token_version: Number(dbUser.token_version ?? 0),
+    is_active: Number(dbUser.is_active ?? 1),
+    expiresAt: now + AUTH_CACHE_TTL_MS,
+  };
+  if (userAuthCache.size > 2000) {
+    userAuthCache.clear();
+  }
+  userAuthCache.set(userId, entry);
+  return entry;
+};
+
 /**
  * verifyToken
  * Mengekstrak Bearer token dari header Authorization,
@@ -50,13 +96,7 @@ export const verifyToken = async (
   try {
     const decoded = jwt.verify(token, JWT_SECRET) as JwtPayload;
 
-    // Cek versi token: bila sesi dicabut dari perangkat lain (token_version
-    // dinaikkan via force-logout), semua token lama langsung ditolak.
-    const [rows] = (await db.query(
-      'SELECT token_version, is_active FROM users WHERE id = ? LIMIT 1',
-      [decoded.userId]
-    )) as [any[], unknown];
-    const dbUser = rows?.[0];
+    const dbUser = await getAuthUserState(decoded.userId);
 
     if (!dbUser) {
       sendUnauthorized(res, 'Pengguna tidak ditemukan. Silakan login ulang.');
@@ -124,11 +164,7 @@ export const optionalVerifyToken = async (
 
   try {
     const decoded = jwt.verify(token, JWT_SECRET) as JwtPayload;
-    const [rows] = (await db.query(
-      'SELECT token_version, is_active FROM users WHERE id = ? LIMIT 1',
-      [decoded.userId]
-    )) as [any[], unknown];
-    const dbUser = rows?.[0];
+    const dbUser = await getAuthUserState(decoded.userId);
 
     if (dbUser && dbUser.is_active !== 0 && (decoded.ver ?? 0) === dbUser.token_version) {
       res.locals['userId'] = decoded.userId;

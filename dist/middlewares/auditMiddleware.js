@@ -43,16 +43,32 @@ const auditLogger = (req, res, next) => {
             req.socket.remoteAddress ??
             'unknown';
         const userAgent = req.headers['user-agent'] ?? 'unknown';
+        if (req.method === 'OPTIONS' || req.method === 'HEAD')
+            return;
         if (req.path === '/health' || req.path === '/api/health')
             return;
         if (req.method === 'GET' && req.originalUrl?.startsWith('/api/admin/logs'))
             return;
         const cleanAuditPath = (req.originalUrl || req.path || '').split('?')[0] || '';
         if (cleanAuditPath === '/favicon.ico' ||
+            cleanAuditPath === '/api/chat/heartbeat' ||
             cleanAuditPath.startsWith('/uploads/') ||
             cleanAuditPath.startsWith('/api/uploads/') ||
             cleanAuditPath.startsWith('/stickers/') ||
             cleanAuditPath.startsWith('/assets/stickers/')) {
+            return;
+        }
+        // Abaikan request GET polling rutin yang sukses agar tidak membanjiri tabel audit_logs
+        if (req.method === 'GET' &&
+            res.statusCode < 400 &&
+            (cleanAuditPath.startsWith('/api/admin/') ||
+                cleanAuditPath.startsWith('/api/mitra/') ||
+                cleanAuditPath.startsWith('/api/chat/') ||
+                cleanAuditPath === '/api/auth/profile')) {
+            return;
+        }
+        // Abaikan bot scanner acak (404 tanpa autentikasi di luar endpoint bisnis)
+        if (res.statusCode === 404 && !userId) {
             return;
         }
         database_js_1.default

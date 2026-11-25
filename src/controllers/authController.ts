@@ -5,6 +5,7 @@ import jwt from 'jsonwebtoken';
 import { OAuth2Client } from 'google-auth-library';
 import db from '../config/database';
 import { getUploadedFileUrl } from '../middlewares/uploadMiddleware.js';
+import { invalidateUserAuthCache } from '../middlewares/authMiddleware.js';
 
 // ============================================================
 // Helper JWT — Access + Refresh Token Pair
@@ -1646,6 +1647,7 @@ export const resetPassword = async (req: Request, res: Response): Promise<void> 
       'UPDATE users SET password_hash = ?, password_changed_at = NOW(), token_version = token_version + 1 WHERE id = ?',
       [passwordHash, targetUserId]
     );
+    invalidateUserAuthCache(targetUserId);
 
     await db.query(
       "UPDATE user_otps SET is_used = 1 WHERE user_id = ? AND otp_type = 'reset_password' AND is_used = 0",
@@ -2395,6 +2397,7 @@ export const logoutOtherDevices = async (_req: Request, res: Response): Promise<
     }
 
     await db.query('UPDATE users SET token_version = token_version + 1 WHERE id = ?', [userId]);
+    invalidateUserAuthCache(Number(userId));
     const [users]: any = await db.query(
       'SELECT id, email, role, token_version FROM users WHERE id = ? LIMIT 1',
       [userId]

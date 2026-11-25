@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import { UserRole } from '../types/index.js';
+export declare const invalidateUserAuthCache: (userId?: number) => void;
 /**
  * verifyToken
  * Mengekstrak Bearer token dari header Authorization,

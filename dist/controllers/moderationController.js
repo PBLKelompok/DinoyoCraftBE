@@ -10,6 +10,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.cancelMyAccountDeletion = exports.submitAccountDeletion = exports.getMyAccountDeletionStatus = exports.submitReport = exports.handleDeletionAction = exports.getDeletionRequests = exports.handleReportAction = exports.getReports = void 0;
 const bcryptjs_1 = __importDefault(require("bcryptjs"));
 const database_js_1 = __importDefault(require("../config/database.js"));
+const authMiddleware_js_1 = require("../middlewares/authMiddleware.js");
 let tablesInitialized = false;
 let initTablesPromise = null;
 /**
@@ -312,9 +313,11 @@ const handleDeletionAction = async (req, res) => {
         if (action === 'approved') {
             if (delReq.user_id) {
                 await database_js_1.default.query('UPDATE users SET is_active = 0, token_version = token_version + 1 WHERE id = ?', [delReq.user_id]);
+                (0, authMiddleware_js_1.invalidateUserAuthCache)(Number(delReq.user_id));
             }
             else if (delReq.email) {
                 await database_js_1.default.query('UPDATE users SET is_active = 0, token_version = token_version + 1 WHERE email = ?', [delReq.email]);
+                (0, authMiddleware_js_1.invalidateUserAuthCache)();
             }
         }
         // Update status pengajuan
