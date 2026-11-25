@@ -606,6 +606,8 @@ export const getPublicProductDetail = async (req: Request, res: Response): Promi
   }
 };
 
+let categoriesHasMetaCols: boolean | null = null;
+
 export const getPublicCategories = async (req: Request, res: Response): Promise<void> => {
   try {
     const includeAll =
@@ -613,15 +615,32 @@ export const getPublicCategories = async (req: Request, res: Response): Promise<
       req.query.all === 'true' ||
       req.query.include_empty === '1';
 
+    if (categoriesHasMetaCols === null) {
+      try {
+        const [cols]: any = await pool.query('SHOW COLUMNS FROM categories');
+        const colNames = new Set((cols || []).map((c: any) => String(c.Field || '').toLowerCase()));
+        categoriesHasMetaCols = colNames.has('description') && colNames.has('image_url');
+      } catch {
+        categoriesHasMetaCols = false;
+      }
+    }
+
+    const selectCols = categoriesHasMetaCols
+      ? 'c.id, c.name, c.description, c.image_url'
+      : 'c.id, c.name, NULL AS description, NULL AS image_url';
+    const groupCols = categoriesHasMetaCols
+      ? 'c.id, c.name, c.description, c.image_url'
+      : 'c.id, c.name';
+
     const [rows]: any = await pool.query(
-      `SELECT c.id, c.name, c.description, c.image_url,
+      `SELECT ${selectCols},
               COUNT(p.id) AS product_count
        FROM categories c
        LEFT JOIN products p
          ON p.category_id = c.id
         AND (p.is_deleted = 0 OR p.is_deleted IS NULL)
         ${includeAll ? '' : 'AND p.mitra_id IN (SELECT id FROM mitra_profiles WHERE is_active = 1 AND is_verified = 1)'}
-       GROUP BY c.id, c.name, c.description, c.image_url
+       GROUP BY ${groupCols}
        ${includeAll ? '' : 'HAVING COUNT(p.id) > 0'}
        ORDER BY c.id ASC`
     );
