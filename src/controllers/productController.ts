@@ -606,7 +606,7 @@ export const getPublicProductDetail = async (req: Request, res: Response): Promi
   }
 };
 
-let categoriesHasMetaCols: boolean | null = null;
+let defaultCategoriesSeeded = false;
 
 export const getPublicCategories = async (req: Request, res: Response): Promise<void> => {
   try {
@@ -615,35 +615,42 @@ export const getPublicCategories = async (req: Request, res: Response): Promise<
       req.query.all === 'true' ||
       req.query.include_empty === '1';
 
-    if (categoriesHasMetaCols === null) {
+    if (!defaultCategoriesSeeded) {
+      defaultCategoriesSeeded = true;
       try {
-        const [cols]: any = await pool.query('SHOW COLUMNS FROM categories');
-        const colNames = new Set((cols || []).map((c: any) => String(c.Field || '').toLowerCase()));
-        categoriesHasMetaCols = colNames.has('description') && colNames.has('image_url');
+        const [cntRows]: any = await pool.query('SELECT COUNT(*) AS total FROM categories');
+        if (Number(cntRows?.[0]?.total ?? 0) === 0) {
+          await pool.query(
+            `INSERT INTO categories (name) VALUES ('Vas & Guci'), ('Alat Makan'), ('Cangkir & Teko'), ('Pot Tanaman'), ('Dekorasi'), ('Suvenir')`
+          );
+        }
       } catch {
-        categoriesHasMetaCols = false;
+        // Abaikan bila tabel categories dikelola eksternal
       }
     }
 
-    const selectCols = categoriesHasMetaCols
-      ? 'c.id, c.name, c.description, c.image_url'
-      : 'c.id, c.name, NULL AS description, NULL AS image_url';
-    const groupCols = categoriesHasMetaCols
-      ? 'c.id, c.name, c.description, c.image_url'
-      : 'c.id, c.name';
+    const sql = includeAll
+      ? `SELECT c.id, c.name, COUNT(p.id) AS product_count
+         FROM categories c
+         LEFT JOIN products p
+           ON p.category_id = c.id
+          AND (p.is_deleted = 0 OR p.is_deleted IS NULL)
+         GROUP BY c.id, c.name
+         ORDER BY c.id ASC`
+      : `SELECT c.id, c.name, COUNT(p.id) AS product_count
+         FROM categories c
+         JOIN products p
+           ON p.category_id = c.id
+          AND (p.is_deleted = 0 OR p.is_deleted IS NULL)
+         JOIN mitra_profiles m
+           ON p.mitra_id = m.id
+          AND m.is_active = 1
+          AND m.is_verified = 1
+         GROUP BY c.id, c.name
+         HAVING COUNT(p.id) > 0
+         ORDER BY c.id ASC`;
 
-    const [rows]: any = await pool.query(
-      `SELECT ${selectCols},
-              COUNT(p.id) AS product_count
-       FROM categories c
-       LEFT JOIN products p
-         ON p.category_id = c.id
-        AND (p.is_deleted = 0 OR p.is_deleted IS NULL)
-        ${includeAll ? '' : 'AND p.mitra_id IN (SELECT id FROM mitra_profiles WHERE is_active = 1 AND is_verified = 1)'}
-       GROUP BY ${groupCols}
-       ${includeAll ? '' : 'HAVING COUNT(p.id) > 0'}
-       ORDER BY c.id ASC`
-    );
+    const [rows]: any = await pool.query(sql);
     res.status(200).json({
       success: true,
       data: rows || [],
