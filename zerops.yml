@@ -20,7 +20,7 @@ zerops:
           port: 5000
           path: /health
         failureTimeout: "90s"
-        retryPeriod: "5s"
+        retryPeriod: "10s"
 
     run:
       base: nodejs@22
