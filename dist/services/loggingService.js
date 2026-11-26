@@ -7,7 +7,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.logHttpRequest = exports.logSystemEvent = exports.ensureSystemLogsSchema = exports.computeRetentionExpiry = exports.deriveHttpStatusReason = exports.classifyRouteCategory = exports.normalizeRouteTemplate = exports.sanitizeMetadata = exports.sanitizeText = exports.sanitizeStack = exports.maskIp = exports.maskPhone = exports.maskEmail = exports.generateRequestId = exports.generateEventId = exports.getPusherClient = void 0;
+exports.logHttpRequest = exports.logSystemEvent = exports.ensureSystemLogsSchema = exports.purgeExpiredSystemLogs = exports.TRASH_RETENTION_DAYS = exports.computeRetentionExpiry = exports.deriveHttpStatusReason = exports.classifyRouteCategory = exports.normalizeRouteTemplate = exports.sanitizeMetadata = exports.sanitizeText = exports.sanitizeStack = exports.maskIp = exports.maskPhone = exports.maskEmail = exports.generateRequestId = exports.generateEventId = exports.getPusherClient = void 0;
 const crypto_1 = __importDefault(require("crypto"));
 const database_js_1 = __importDefault(require("../config/database.js"));
 const pusher_js_1 = require("../utils/pusher.js");
@@ -208,6 +208,21 @@ const computeRetentionExpiry = (severity, fromDate = new Date()) => {
     return new Date(fromDate.getTime() + days * 24 * 60 * 60 * 1000);
 };
 exports.computeRetentionExpiry = computeRetentionExpiry;
+// Durasi penyimpanan log di Tempat Sampah sebelum dihapus permanen otomatis dari database (7 hari)
+exports.TRASH_RETENTION_DAYS = 7;
+let autoPurgeTimerStarted = false;
+const purgeExpiredSystemLogs = async () => {
+    try {
+        const [result] = await database_js_1.default.query(`DELETE FROM system_logs
+       WHERE (deleted_at IS NOT NULL AND deleted_at <= DATE_SUB(NOW(), INTERVAL ${exports.TRASH_RETENTION_DAYS} DAY))
+          OR (retention_expires_at IS NOT NULL AND retention_expires_at <= NOW())`);
+        return Number(result?.affectedRows || 0);
+    }
+    catch {
+        return 0;
+    }
+};
+exports.purgeExpiredSystemLogs = purgeExpiredSystemLogs;
 // ------------------------------------------------------------
 //  Inisialisasi Skema Tabel system_logs & Seed Data Awal (§9.2, §14.1)
 // ------------------------------------------------------------
@@ -263,6 +278,17 @@ const ensureSystemLogsSchema = async () => {
       KEY \`idx_system_logs_status_occurred\` (\`status_code\`, \`occurred_at\`)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
   `);
+    // Bersihkan otomatis log di Tempat Sampah yang melewati batas retensi 7 hari atau kedaluwarsa
+    await (0, exports.purgeExpiredSystemLogs)();
+    if (!autoPurgeTimerStarted) {
+        autoPurgeTimerStarted = true;
+        const timer = setInterval(() => {
+            (0, exports.purgeExpiredSystemLogs)().catch(() => { });
+        }, 60 * 60 * 1000);
+        if (typeof timer?.unref === 'function') {
+            timer.unref();
+        }
+    }
     // Bersihkan sisa demo/log legacy SociaBuzz (scbz), noise asset 404, Pusher 400 historis, dan burst pre-migrasi
     await database_js_1.default.query(`
     DELETE FROM system_logs
@@ -802,7 +828,7 @@ const logHttpRequest = (req, res, durationMs) => {
         return;
     if (cleanPath === '/api/chat/heartbeat' && res.statusCode < 400)
         return;
-    if (req.method === 'GET' && cleanPath.startsWith('/api/admin/logs') && !cleanPath.endsWith('/export')) {
+    if (cleanPath.startsWith('/api/admin/logs') && !cleanPath.endsWith('/export')) {
         return;
     }
     if (req.method === 'GET' &&

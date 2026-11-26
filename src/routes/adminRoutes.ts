@@ -137,6 +137,7 @@ router.get('/logs', systemLogController.getSystemLogs);
 router.get('/logs/summary', systemLogController.getSystemLogsSummary);
 router.get('/logs/export', systemLogController.exportSystemLogsCsv);
 router.post('/logs/bulk-delete', systemLogController.bulkDeleteSystemLogs);
+router.post('/logs/bulk-purge', systemLogController.bulkPurgeSystemLogs);
 router.post('/logs/pusher-auth', systemLogController.authorizePusherChannel);
 router.get('/logs/:eventId', systemLogController.getSystemLogDetail);
 router.get('/logs/:eventId/related', systemLogController.getRelatedSystemLogs);

@@ -244,6 +244,24 @@ export const computeRetentionExpiry = (severity: LogSeverity, fromDate = new Dat
   return new Date(fromDate.getTime() + days * 24 * 60 * 60 * 1000);
 };
 
+// Durasi penyimpanan log di Tempat Sampah sebelum dihapus permanen otomatis dari database (7 hari)
+export const TRASH_RETENTION_DAYS = 7;
+
+let autoPurgeTimerStarted = false;
+
+export const purgeExpiredSystemLogs = async (): Promise<number> => {
+  try {
+    const [result]: any = await pool.query(
+      `DELETE FROM system_logs
+       WHERE (deleted_at IS NOT NULL AND deleted_at <= DATE_SUB(NOW(), INTERVAL ${TRASH_RETENTION_DAYS} DAY))
+          OR (retention_expires_at IS NOT NULL AND retention_expires_at <= NOW())`
+    );
+    return Number(result?.affectedRows || 0);
+  } catch {
+    return 0;
+  }
+};
+
 // ------------------------------------------------------------
 //  Inisialisasi Skema Tabel system_logs & Seed Data Awal (§9.2, §14.1)
 // ------------------------------------------------------------
@@ -299,6 +317,18 @@ export const ensureSystemLogsSchema = async (): Promise<void> => {
       KEY \`idx_system_logs_status_occurred\` (\`status_code\`, \`occurred_at\`)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
   `);
+
+  // Bersihkan otomatis log di Tempat Sampah yang melewati batas retensi 7 hari atau kedaluwarsa
+  await purgeExpiredSystemLogs();
+  if (!autoPurgeTimerStarted) {
+    autoPurgeTimerStarted = true;
+    const timer = setInterval(() => {
+      purgeExpiredSystemLogs().catch(() => {});
+    }, 60 * 60 * 1000);
+    if (typeof (timer as any)?.unref === 'function') {
+      (timer as any).unref();
+    }
+  }
 
   // Bersihkan sisa demo/log legacy SociaBuzz (scbz), noise asset 404, Pusher 400 historis, dan burst pre-migrasi
   await pool.query(`
@@ -854,7 +884,7 @@ export const logHttpRequest = (
   if (cleanPath === '/health' || cleanPath === '/api/health') return;
   if (cleanPath === '/api/admin/logs/pusher-auth') return;
   if (cleanPath === '/api/chat/heartbeat' && res.statusCode < 400) return;
-  if (req.method === 'GET' && cleanPath.startsWith('/api/admin/logs') && !cleanPath.endsWith('/export')) {
+  if (cleanPath.startsWith('/api/admin/logs') && !cleanPath.endsWith('/export')) {
     return;
   }
   if (

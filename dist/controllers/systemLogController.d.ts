@@ -9,6 +9,7 @@ export declare const softDeleteSystemLog: (req: Request, res: Response) => Promi
 export declare const bulkDeleteSystemLogs: (req: Request, res: Response) => Promise<void>;
 export declare const restoreSystemLog: (req: Request, res: Response) => Promise<void>;
 export declare const purgeSystemLog: (req: Request, res: Response) => Promise<void>;
+export declare const bulkPurgeSystemLogs: (req: Request, res: Response) => Promise<void>;
 export declare const authorizePusherChannel: (req: Request, res: Response) => Promise<void>;
 export declare const ingestClientLog: (req: Request, res: Response) => Promise<void>;
 //# sourceMappingURL=systemLogController.d.ts.map

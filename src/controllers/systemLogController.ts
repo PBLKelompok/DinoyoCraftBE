@@ -12,15 +12,25 @@ import {
   LogCategory,
   LogSeverity,
   maskIp,
+  purgeExpiredSystemLogs,
   sanitizeMetadata,
   sanitizeText,
+  TRASH_RETENTION_DAYS,
 } from '../services/loggingService.js';
 
 let schemaReady = false;
+let lastAutoPurgeCheckMs = 0;
 const ensureReady = async (): Promise<void> => {
   if (!schemaReady) {
     await ensureSystemLogsSchema();
     schemaReady = true;
+    lastAutoPurgeCheckMs = Date.now();
+    return;
+  }
+  const now = Date.now();
+  if (now - lastAutoPurgeCheckMs >= 5 * 60 * 1000) {
+    lastAutoPurgeCheckMs = now;
+    await purgeExpiredSystemLogs();
   }
 };
 
@@ -275,7 +285,7 @@ const formatLogRow = (row: any, includeSensitiveDetail = false) => {
 export const getSystemLogs = async (req: Request, res: Response): Promise<void> => {
   try {
     await ensureReady();
-    const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 100));
+    const limit = Math.min(500, Math.max(1, Number(req.query.limit) || 200));
     const { whereSql, params } = buildLogFilterWhere(req.query as Record<string, any>);
 
     const [rows]: any = await pool.query(
@@ -319,13 +329,14 @@ export const getSystemLogsSummary = async (req: Request, res: Response): Promise
   try {
     await ensureReady();
     const queryForSummary = { ...req.query };
-    if (!queryForSummary.range || queryForSummary.range === 'live') {
-      queryForSummary.range = '24h';
-    }
     delete queryForSummary.cursor;
     delete queryForSummary.severity;
 
+    const queryForCategories = { ...queryForSummary };
+    delete queryForCategories.category;
+
     const { whereSql, params } = buildLogFilterWhere(queryForSummary);
+    const { whereSql: catWhereSql, params: catParams } = buildLogFilterWhere(queryForCategories);
 
     const [sevRows]: any = await pool.query(
       `SELECT severity, COUNT(*) AS total
@@ -338,9 +349,9 @@ export const getSystemLogsSummary = async (req: Request, res: Response): Promise
     const [catRows]: any = await pool.query(
       `SELECT category, COUNT(*) AS total
        FROM system_logs
-       ${whereSql}
+       ${catWhereSql}
        GROUP BY category`,
-      params
+      catParams
     );
 
     const [unackRows]: any = await pool.query(
@@ -392,6 +403,7 @@ export const getSystemLogsSummary = async (req: Request, res: Response): Promise
         apiErrorRate,
         unacknowledgedErrors15m: Number(unackRows?.[0]?.total || 0),
         deletedCount: Number(deletedCountRows?.[0]?.total || 0),
+        trashRetentionDays: TRASH_RETENTION_DAYS,
         categoryCounts,
         updatedAt: new Date().toISOString(),
       },
@@ -508,6 +520,7 @@ export const getRelatedSystemLogs = async (req: Request, res: Response): Promise
 //  5. POST /api/admin/logs/:eventId/acknowledge — Tandai Diperiksa (§11)
 // ------------------------------------------------------------
 export const acknowledgeSystemLog = async (req: Request, res: Response): Promise<void> => {
+  res.locals['skipSystemLog'] = true;
   try {
     await ensureReady();
     const { eventId } = req.params;
@@ -524,18 +537,6 @@ export const acknowledgeSystemLog = async (req: Request, res: Response): Promise
       res.status(404).json({ success: false, message: 'Log tidak ditemukan' });
       return;
     }
-
-    await logSystemEvent({
-      category: 'admin_audit',
-      eventName: 'admin_audit.log_acknowledged',
-      severity: 'info',
-      outcome: 'success',
-      message: `Admin #${adminId} menandai event ${eventId} telah diperiksa (acknowledged)`,
-      source: 'backend',
-      service: 'admin-logs',
-      correlation: { requestId: res.locals['requestId'], userId: Number(adminId), role: 'admin' },
-      metadata: { targetEventId: eventId },
-    });
 
     res.status(200).json({
       success: true,
@@ -666,6 +667,7 @@ export const exportSystemLogsCsv = async (req: Request, res: Response): Promise<
 //  7. DELETE /api/admin/logs/:eventId — Soft Delete Satu Log (§8.5, §11)
 // ------------------------------------------------------------
 export const softDeleteSystemLog = async (req: Request, res: Response): Promise<void> => {
+  res.locals['skipSystemLog'] = true;
   try {
     await ensureReady();
     const { eventId } = req.params;
@@ -673,19 +675,11 @@ export const softDeleteSystemLog = async (req: Request, res: Response): Promise<
     const adminId = (req as any).user?.id || res.locals['userId'] || 1;
 
     const [check]: any = await pool.query(
-      'SELECT id, category FROM system_logs WHERE event_id = ? LIMIT 1',
+      'SELECT id FROM system_logs WHERE event_id = ? LIMIT 1',
       [eventId]
     );
     if (!check || check.length === 0) {
       res.status(404).json({ success: false, message: 'Log tidak ditemukan' });
-      return;
-    }
-
-    if (check[0].category === 'admin_audit') {
-      res.status(403).json({
-        success: false,
-        message: 'Log kategori admin_audit dilindungi dan tidak dapat dihapus.',
-      });
       return;
     }
 
@@ -696,21 +690,9 @@ export const softDeleteSystemLog = async (req: Request, res: Response): Promise<
       [adminId, String(reason).slice(0, 250), eventId]
     );
 
-    await logSystemEvent({
-      category: 'admin_audit',
-      eventName: 'admin_audit.log_soft_deleted',
-      severity: 'warning',
-      outcome: 'success',
-      message: `Admin #${adminId} melakukan soft-delete pada log ${eventId}`,
-      source: 'backend',
-      service: 'admin-logs',
-      correlation: { requestId: res.locals['requestId'], userId: Number(adminId), role: 'admin' },
-      metadata: { targetEventId: eventId, reason },
-    });
-
     res.status(200).json({
       success: true,
-      message: 'Log berhasil dipindahkan ke tempat sampah (dapat dipulihkan selama 30 hari).',
+      message: `Log berhasil dipindahkan ke tempat sampah (otomatis terhapus permanen setelah ${TRASH_RETENTION_DAYS} hari).`,
       data: { eventId },
     });
   } catch (err: any) {
@@ -723,43 +705,39 @@ export const softDeleteSystemLog = async (req: Request, res: Response): Promise<
 //  8. POST /api/admin/logs/bulk-delete — Soft Delete Massal (§8.5, §11)
 // ------------------------------------------------------------
 export const bulkDeleteSystemLogs = async (req: Request, res: Response): Promise<void> => {
+  res.locals['skipSystemLog'] = true;
   try {
     await ensureReady();
     const adminId = (req as any).user?.id || res.locals['userId'] || 1;
-    const { eventIds, filter, confirmText, reason = 'Hapus massal oleh Admin' } = req.body || {};
+    const { eventIds, filter, reason = 'Hapus massal oleh Admin' } = req.body || {};
 
     let affectedCount = 0;
 
     if (Array.isArray(eventIds) && eventIds.length > 0) {
-      const expectedConfirm = `HAPUS ${eventIds.length}`;
-      if (confirmText && String(confirmText).trim().toUpperCase() !== expectedConfirm) {
-        res.status(400).json({
-          success: false,
-          message: `Konfirmasi tidak sesuai. Ketik "${expectedConfirm}" untuk melanjutkan.`,
-        });
-        return;
+      const cleanIds = eventIds.map((id) => String(id).trim()).filter(Boolean);
+      if (cleanIds.length > 0) {
+        const placeholders = cleanIds.map(() => '?').join(',');
+        const [result]: any = await pool.query(
+          `UPDATE system_logs
+           SET deleted_at = NOW(), deleted_by = ?, delete_reason = ?
+           WHERE event_id IN (${placeholders})
+             AND deleted_at IS NULL`,
+          [adminId, String(reason).slice(0, 250), ...cleanIds]
+        );
+        affectedCount = Number(result?.affectedRows || 0);
       }
-
-      const placeholders = eventIds.map(() => '?').join(',');
-      const [result]: any = await pool.query(
-        `UPDATE system_logs
-         SET deleted_at = NOW(), deleted_by = ?, delete_reason = ?
-         WHERE event_id IN (${placeholders})
-           AND category != 'admin_audit'
-           AND deleted_at IS NULL`,
-        [adminId, String(reason).slice(0, 250), ...eventIds]
-      );
-      affectedCount = Number(result?.affectedRows || 0);
     } else if (filter && typeof filter === 'object') {
-      const { whereSql, params } = buildLogFilterWhere(filter);
-      const extraRule = whereSql
-        ? `${whereSql} AND category != 'admin_audit'`
-        : `WHERE deleted_at IS NULL AND category != 'admin_audit'`;
+      const safeFilter = { ...filter };
+      delete safeFilter.cursor;
+      delete safeFilter.onlyDeleted;
+      delete safeFilter.includeDeleted;
+      const { whereSql, params } = buildLogFilterWhere(safeFilter);
+      const finalWhere = whereSql || 'WHERE deleted_at IS NULL';
 
       const [result]: any = await pool.query(
         `UPDATE system_logs
          SET deleted_at = NOW(), deleted_by = ?, delete_reason = ?
-         ${extraRule}`,
+         ${finalWhere}`,
         [adminId, String(reason).slice(0, 250), ...params]
       );
       affectedCount = Number(result?.affectedRows || 0);
@@ -771,21 +749,9 @@ export const bulkDeleteSystemLogs = async (req: Request, res: Response): Promise
       return;
     }
 
-    await logSystemEvent({
-      category: 'admin_audit',
-      eventName: 'admin_audit.logs_bulk_deleted',
-      severity: 'warning',
-      outcome: 'success',
-      message: `Admin #${adminId} melakukan soft-delete massal terhadap ${affectedCount} log`,
-      source: 'backend',
-      service: 'admin-logs',
-      correlation: { requestId: res.locals['requestId'], userId: Number(adminId), role: 'admin' },
-      metadata: { affectedCount, reason, filter: filter || { selectedCount: eventIds?.length } },
-    });
-
     res.status(200).json({
       success: true,
-      message: `${affectedCount} log berhasil dipindahkan ke tempat sampah (dapat dipulihkan selama 30 hari).`,
+      message: `${affectedCount} log berhasil dipindahkan ke tempat sampah (otomatis terhapus permanen setelah ${TRASH_RETENTION_DAYS} hari).`,
       data: { affectedCount },
     });
   } catch (err: any) {
@@ -798,10 +764,10 @@ export const bulkDeleteSystemLogs = async (req: Request, res: Response): Promise
 //  9. POST /api/admin/logs/:eventId/restore — Pulihkan Soft-Delete (§8.5, §11)
 // ------------------------------------------------------------
 export const restoreSystemLog = async (req: Request, res: Response): Promise<void> => {
+  res.locals['skipSystemLog'] = true;
   try {
     await ensureReady();
     const { eventId } = req.params;
-    const adminId = (req as any).user?.id || res.locals['userId'] || 1;
 
     const [result]: any = await pool.query(
       `UPDATE system_logs
@@ -818,18 +784,6 @@ export const restoreSystemLog = async (req: Request, res: Response): Promise<voi
       return;
     }
 
-    await logSystemEvent({
-      category: 'admin_audit',
-      eventName: 'admin_audit.log_restored',
-      severity: 'info',
-      outcome: 'success',
-      message: `Admin #${adminId} memulihkan log ${eventId} dari tempat sampah`,
-      source: 'backend',
-      service: 'admin-logs',
-      correlation: { requestId: res.locals['requestId'], userId: Number(adminId), role: 'admin' },
-      metadata: { targetEventId: eventId },
-    });
-
     res.status(200).json({
       success: true,
       message: 'Log berhasil dipulihkan kembali ke daftar aktif.',
@@ -845,58 +799,87 @@ export const restoreSystemLog = async (req: Request, res: Response): Promise<voi
 //  10. DELETE /api/admin/logs/:eventId/purge — Purge Permanen (§8.5, §11)
 // ------------------------------------------------------------
 export const purgeSystemLog = async (req: Request, res: Response): Promise<void> => {
+  res.locals['skipSystemLog'] = true;
   try {
     await ensureReady();
     const { eventId } = req.params;
-    const confirmText = req.body?.confirmText || req.query?.confirmText;
-    const adminId = (req as any).user?.id || res.locals['userId'] || 1;
 
-    if (String(confirmText || '').toUpperCase() !== 'PURGE') {
-      res.status(400).json({
-        success: false,
-        message: 'Konfirmasi kedua diperlukan: ketik "PURGE" untuk menghapus permanen.',
-      });
-      return;
-    }
-
-    const [check]: any = await pool.query(
-      'SELECT category FROM system_logs WHERE event_id = ? LIMIT 1',
-      [eventId]
-    );
-    if (!check || check.length === 0) {
+    const [result]: any = await pool.query('DELETE FROM system_logs WHERE event_id = ?', [eventId]);
+    if (!result?.affectedRows) {
       res.status(404).json({ success: false, message: 'Log tidak ditemukan' });
       return;
     }
-    if (check[0].category === 'admin_audit') {
-      res.status(403).json({
-        success: false,
-        message: 'Log audit administratif tidak dapat di-purge permanen.',
-      });
-      return;
-    }
-
-    await pool.query('DELETE FROM system_logs WHERE event_id = ?', [eventId]);
-
-    await logSystemEvent({
-      category: 'admin_audit',
-      eventName: 'admin_audit.log_purged',
-      severity: 'warning',
-      outcome: 'success',
-      message: `Super Admin #${adminId} melakukan PURGE PERMANEN pada log ${eventId}`,
-      source: 'backend',
-      service: 'admin-logs',
-      correlation: { requestId: res.locals['requestId'], userId: Number(adminId), role: 'admin' },
-      metadata: { purgedEventId: eventId },
-    });
 
     res.status(200).json({
       success: true,
-      message: 'Log telah dihapus secara permanen (purged).',
+      message: 'Log telah dihapus secara permanen dari database.',
       data: { eventId },
     });
   } catch (err: any) {
     console.error('Error purgeSystemLog:', err);
     res.status(500).json({ success: false, message: 'Gagal melakukan purge log' });
+  }
+};
+
+// ------------------------------------------------------------
+//  10b. POST /api/admin/logs/bulk-purge — Hapus Permanen Massal / Kosongkan Tempat Sampah
+// ------------------------------------------------------------
+export const bulkPurgeSystemLogs = async (req: Request, res: Response): Promise<void> => {
+  res.locals['skipSystemLog'] = true;
+  try {
+    await ensureReady();
+    const { eventIds, filter, emptyTrash } = req.body || {};
+    let affectedCount = 0;
+
+    if (Array.isArray(eventIds) && eventIds.length > 0) {
+      const cleanIds = eventIds.map((id) => String(id).trim()).filter(Boolean);
+      if (cleanIds.length > 0) {
+        // Chunk jika jumlah ID besar
+        const chunkSize = 500;
+        for (let i = 0; i < cleanIds.length; i += chunkSize) {
+          const slice = cleanIds.slice(i, i + chunkSize);
+          const placeholders = slice.map(() => '?').join(',');
+          const [result]: any = await pool.query(
+            `DELETE FROM system_logs WHERE event_id IN (${placeholders})`,
+            slice
+          );
+          affectedCount += Number(result?.affectedRows || 0);
+        }
+      }
+    } else if (emptyTrash === true) {
+      const [result]: any = await pool.query(
+        'DELETE FROM system_logs WHERE deleted_at IS NOT NULL'
+      );
+      affectedCount = Number(result?.affectedRows || 0);
+    } else if (filter && typeof filter === 'object') {
+      const trashFilter = { ...filter, onlyDeleted: 'true' };
+      delete trashFilter.cursor;
+      const { whereSql, params } = buildLogFilterWhere(trashFilter);
+      const finalWhere = whereSql || 'WHERE deleted_at IS NOT NULL';
+      const [result]: any = await pool.query(
+        `DELETE FROM system_logs ${finalWhere}`,
+        params
+      );
+      affectedCount = Number(result?.affectedRows || 0);
+    } else {
+      res.status(400).json({
+        success: false,
+        message: 'Pilih daftar log atau kosongkan tempat sampah untuk dihapus permanen.',
+      });
+      return;
+    }
+
+    res.status(200).json({
+      success: true,
+      message: `${affectedCount} log berhasil dihapus secara permanen dari database.`,
+      data: { affectedCount },
+    });
+  } catch (err: any) {
+    console.error('Error bulkPurgeSystemLogs:', err);
+    res.status(500).json({
+      success: false,
+      message: 'Gagal menghapus permanen log dari tempat sampah',
+    });
   }
 };
 
