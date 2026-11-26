@@ -20,5 +20,6 @@ export declare const resendLoginOtp: (req: Request, res: Response) => Promise<vo
 export declare const requestTwoFactorOtp: (req: Request, res: Response) => Promise<void>;
 export declare const verifyTwoFactorOtp: (req: Request, res: Response) => Promise<void>;
 export declare const changePassword: (req: Request, res: Response) => Promise<void>;
-export declare const logoutOtherDevices: (_req: Request, res: Response) => Promise<void>;
+export declare const getKnownDevices: (req: Request, res: Response) => Promise<void>;
+export declare const logoutOtherDevices: (req: Request, res: Response) => Promise<void>;
 //# sourceMappingURL=authController.d.ts.map

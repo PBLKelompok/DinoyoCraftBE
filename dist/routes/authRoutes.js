@@ -36,6 +36,7 @@ router.post('/reset-password', rateLimitMiddleware_js_1.otpVerifyRateLimiter, (0
 router.post('/2fa/request-otp', authMiddleware_js_1.verifyToken, rateLimitMiddleware_js_1.otpSendRateLimiter, (0, validatorMiddleware_js_1.validateZod)(schemas_js_1.requestTwoFactorOtpSchema), authController_js_1.requestTwoFactorOtp);
 router.post('/2fa/verify-otp', authMiddleware_js_1.verifyToken, rateLimitMiddleware_js_1.otpVerifyRateLimiter, (0, validatorMiddleware_js_1.validateZod)(schemas_js_1.verifyTwoFactorOtpSchema), authController_js_1.verifyTwoFactorOtp);
 router.put('/change-password', authMiddleware_js_1.verifyToken, (0, validatorMiddleware_js_1.validateZod)(schemas_js_1.changePasswordSchema), authController_js_1.changePassword);
+router.get('/devices', authMiddleware_js_1.verifyToken, authController_js_1.getKnownDevices);
 router.post('/logout-other-devices', authMiddleware_js_1.verifyToken, authController_js_1.logoutOtherDevices);
 // Refresh Token (perpanjangan sesi mobile)
 router.post('/refresh', authController_js_1.refreshToken);

@@ -330,7 +330,7 @@ export const getUserOrders = async (req: Request, res: Response): Promise<void> 
 
     const [orders]: any = await pool.query(query, params);
 
-    // Ambil order items untuk masing-masing order
+    // Ambil order items untuk masing-masing order (beserta status apakah item sudah diulas)
     for (const order of orders) {
       const [items]: any = await pool.query(
         `SELECT 
@@ -340,11 +340,29 @@ export const getUserOrders = async (req: Request, res: Response): Promise<void> 
            oi.unit_price,
            oi.variant,
            p.name AS product_name,
-           p.image_urls
+           p.image_urls,
+           (
+             SELECT r.id FROM reviews r
+             WHERE r.user_id = ?
+               AND (
+                 r.order_item_id = oi.id
+                 OR (r.order_item_id IS NULL AND r.product_id = oi.product_id)
+               )
+             ORDER BY r.id DESC LIMIT 1
+           ) AS review_id,
+           (
+             SELECT r.rating FROM reviews r
+             WHERE r.user_id = ?
+               AND (
+                 r.order_item_id = oi.id
+                 OR (r.order_item_id IS NULL AND r.product_id = oi.product_id)
+               )
+             ORDER BY r.id DESC LIMIT 1
+           ) AS review_rating
          FROM order_items oi
          JOIN products p ON oi.product_id = p.id
          WHERE oi.order_id = ?`,
-        [order.id]
+        [order.user_id, order.user_id, order.id]
       );
 
       order.items = items.map((item: any) => {
@@ -354,8 +372,19 @@ export const getUserOrders = async (req: Request, res: Response): Promise<void> 
         } else if (Array.isArray(item.image_urls)) {
           images = item.image_urls;
         }
-        return { ...item, image_urls: images };
+        const reviewId = item.review_id ? Number(item.review_id) : null;
+        return {
+          ...item,
+          image_urls: images,
+          review_id: reviewId,
+          review_rating: item.review_rating ? Number(item.review_rating) : null,
+          is_reviewed: Boolean(reviewId),
+        };
       });
+      order.is_reviewed =
+        order.items.length > 0 &&
+        order.items.every((it: any) => Boolean(it.is_reviewed));
+      order.has_review = order.items.some((it: any) => Boolean(it.is_reviewed));
     }
 
     // Normalisasi angka: mysql2 mengembalikan DECIMAL sebagai string —
@@ -445,11 +474,29 @@ export const getOrderById = async (req: Request, res: Response): Promise<void> =
       `SELECT 
          oi.*,
          p.name AS product_name,
-         p.image_urls
+         p.image_urls,
+         (
+           SELECT r.id FROM reviews r
+           WHERE r.user_id = ?
+             AND (
+               r.order_item_id = oi.id
+               OR (r.order_item_id IS NULL AND r.product_id = oi.product_id)
+             )
+           ORDER BY r.id DESC LIMIT 1
+         ) AS review_id,
+         (
+           SELECT r.rating FROM reviews r
+           WHERE r.user_id = ?
+             AND (
+               r.order_item_id = oi.id
+               OR (r.order_item_id IS NULL AND r.product_id = oi.product_id)
+             )
+           ORDER BY r.id DESC LIMIT 1
+         ) AS review_rating
        FROM order_items oi
        JOIN products p ON oi.product_id = p.id
        WHERE oi.order_id = ?`,
-      [id]
+      [order.user_id, order.user_id, id]
     );
 
     order.items = items.map((item: any) => {
@@ -459,8 +506,19 @@ export const getOrderById = async (req: Request, res: Response): Promise<void> =
       } else if (Array.isArray(item.image_urls)) {
         images = item.image_urls;
       }
-      return { ...item, image_urls: images };
+      const reviewId = item.review_id ? Number(item.review_id) : null;
+      return {
+        ...item,
+        image_urls: images,
+        review_id: reviewId,
+        review_rating: item.review_rating ? Number(item.review_rating) : null,
+        is_reviewed: Boolean(reviewId),
+      };
     });
+    order.is_reviewed =
+      order.items.length > 0 &&
+      order.items.every((it: any) => Boolean(it.is_reviewed));
+    order.has_review = order.items.some((it: any) => Boolean(it.is_reviewed));
 
     const deadline =
       order.status === 'pending'
@@ -747,11 +805,20 @@ export const updateOrderStatus = async (req: Request, res: Response): Promise<vo
 
     // Push FCM ke HP customer & mitra (non-blocking).
     if (statusMessages[status]) {
+      const targetTab =
+        status === 'paid' || status === 'packed'
+          ? 'Dikemas'
+          : status === 'shipped'
+          ? 'Dikirim'
+          : status === 'completed'
+          ? 'Diterima'
+          : 'Belum Bayar';
+      const customerOrderRoute = `/profile?tab=${encodeURIComponent(targetTab)}&trackOrderId=${id}`;
       void sendPushNotificationToUser(
         order.user_id,
         notifTitle,
         statusMessages[status],
-        { type: 'order', route: '/profile', order_id: String(id), status }
+        { type: 'order', route: customerOrderRoute, order_id: String(id), status }
       );
     }
     if (status === 'completed') {

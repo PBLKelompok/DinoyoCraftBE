@@ -1,16 +1,200 @@
 "use strict";
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
 var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.logoutOtherDevices = exports.changePassword = exports.verifyTwoFactorOtp = exports.requestTwoFactorOtp = exports.resendLoginOtp = exports.verifyLoginOtp = exports.refreshToken = exports.checkUsername = exports.resendRegisterOtp = exports.verifyRegisterOtp = exports.reuploadDocs = exports.resetPassword = exports.verifyOtp = exports.forgotPassword = exports.updateProfile = exports.getProfile = exports.googleLogin = exports.loginMitra = exports.login = exports.registerMitra = exports.saveFcmToken = exports.registerCustomer = void 0;
+exports.logoutOtherDevices = exports.getKnownDevices = exports.changePassword = exports.verifyTwoFactorOtp = exports.requestTwoFactorOtp = exports.resendLoginOtp = exports.verifyLoginOtp = exports.refreshToken = exports.checkUsername = exports.resendRegisterOtp = exports.verifyRegisterOtp = exports.reuploadDocs = exports.resetPassword = exports.verifyOtp = exports.forgotPassword = exports.updateProfile = exports.getProfile = exports.googleLogin = exports.loginMitra = exports.login = exports.registerMitra = exports.saveFcmToken = exports.registerCustomer = void 0;
 const emailService_js_1 = require("../utils/emailService.js");
+const crypto_1 = __importDefault(require("crypto"));
 const bcryptjs_1 = __importDefault(require("bcryptjs"));
 const jsonwebtoken_1 = __importDefault(require("jsonwebtoken"));
 const google_auth_library_1 = require("google-auth-library");
 const database_1 = __importDefault(require("../config/database"));
+const pusher_js_1 = __importStar(require("../utils/pusher.js"));
+const notificationService_js_1 = require("../services/notificationService.js");
 const uploadMiddleware_js_1 = require("../middlewares/uploadMiddleware.js");
 const authMiddleware_js_1 = require("../middlewares/authMiddleware.js");
+let knownDevicesTableReady = false;
+const ensureKnownDevicesTable = async () => {
+    if (knownDevicesTableReady)
+        return;
+    await database_1.default.query(`
+    CREATE TABLE IF NOT EXISTS user_known_devices (
+      id INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+      user_id INT UNSIGNED NOT NULL,
+      device_fingerprint VARCHAR(191) NOT NULL,
+      device_name VARCHAR(255) NOT NULL,
+      ip_address VARCHAR(100) DEFAULT NULL,
+      last_login_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE KEY uniq_user_device (user_id, device_fingerprint),
+      KEY idx_ukd_user (user_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+    knownDevicesTableReady = true;
+};
+const extractClientDeviceInfo = (req) => {
+    const rawDeviceId = String(req.headers['x-device-id'] || (req.body && req.body.device_id) || '').trim();
+    const rawDeviceName = String(req.headers['x-device-name'] || (req.body && req.body.device_name) || '').trim();
+    const ua = String(req.headers['user-agent'] || '').trim();
+    let deviceName = rawDeviceName;
+    if (!deviceName) {
+        if (/android/i.test(ua)) {
+            deviceName = 'Perangkat Android';
+        }
+        else if (/iphone|ipad|ios/i.test(ua)) {
+            deviceName = 'Perangkat iOS';
+        }
+        else if (/windows/i.test(ua)) {
+            deviceName = 'Browser Web (Windows)';
+        }
+        else if (/macintosh|mac os/i.test(ua)) {
+            deviceName = 'Browser Web (macOS)';
+        }
+        else if (/linux/i.test(ua)) {
+            deviceName = 'Browser Web (Linux)';
+        }
+        else {
+            deviceName = 'Perangkat Lain';
+        }
+    }
+    const fingerprint = rawDeviceId
+        ? rawDeviceId.slice(0, 180)
+        : `ua_${crypto_1.default
+            .createHash('sha256')
+            .update(ua || deviceName)
+            .digest('hex')
+            .slice(0, 32)}`;
+    const forwarded = String(req.headers['x-forwarded-for'] || '')
+        .split(',')[0]
+        .trim();
+    const rawIp = forwarded || String(req.headers['x-real-ip'] || req.ip || '-').trim();
+    const ipAddress = rawIp.replace(/^::ffff:/, '') || '-';
+    return { fingerprint, deviceName: deviceName.slice(0, 240), ipAddress: ipAddress.slice(0, 95) };
+};
+const formatWibTimestamp = (date = new Date()) => {
+    try {
+        return (new Intl.DateTimeFormat('id-ID', {
+            timeZone: 'Asia/Jakarta',
+            day: '2-digit',
+            month: 'short',
+            year: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: false,
+        }).format(date) + ' WIB');
+    }
+    catch {
+        return date.toISOString();
+    }
+};
+const handlePostLoginDeviceSecurity = async (req, user, authMethodLabel) => {
+    try {
+        await ensureKnownDevicesTable();
+        const { fingerprint, deviceName, ipAddress } = extractClientDeviceInfo(req);
+        const userId = Number(user.id);
+        if (!userId || isNaN(userId))
+            return false;
+        if (user.role && user.role !== 'pengunjung')
+            return false;
+        const [existingDevices] = await database_1.default.query(`SELECT device_fingerprint, device_name, last_login_at
+       FROM user_known_devices
+       WHERE user_id = ?
+       ORDER BY last_login_at DESC`, [userId]);
+        let isDifferentDeviceLogin = false;
+        if (Array.isArray(existingDevices) && existingDevices.length > 0) {
+            const latestDevice = existingDevices[0];
+            const knownBefore = existingDevices.some((d) => String(d.device_fingerprint) === fingerprint);
+            isDifferentDeviceLogin =
+                !knownBefore || String(latestDevice.device_fingerprint) !== fingerprint;
+        }
+        else {
+            const [tokenRows] = await database_1.default.query('SELECT COUNT(*) AS cnt FROM user_device_tokens WHERE user_id = ?', [userId]);
+            if (Number(tokenRows?.[0]?.cnt || 0) > 0) {
+                isDifferentDeviceLogin = true;
+            }
+        }
+        await database_1.default.query(`INSERT INTO user_known_devices (user_id, device_fingerprint, device_name, ip_address, last_login_at)
+       VALUES (?, ?, ?, ?, NOW())
+       ON DUPLICATE KEY UPDATE
+         device_name = VALUES(device_name),
+         ip_address = VALUES(ip_address),
+         last_login_at = NOW()`, [userId, fingerprint, deviceName, ipAddress]);
+        if (isDifferentDeviceLogin) {
+            const notifTitle = 'Login Perangkat Baru Terdeteksi';
+            const notifBody = `Akun Anda baru saja masuk pada perangkat ${deviceName}. Jika ini bukan Anda, segera ubah kata sandi di Pengaturan.`;
+            await database_1.default
+                .query(`INSERT INTO notifications (user_id, title, message, type)
+           VALUES (?, ?, ?, 'account')`, [userId, notifTitle, notifBody])
+                .catch(() => { });
+            if ((0, pusher_js_1.isPusherAvailable)()) {
+                pusher_js_1.default
+                    .trigger(`user-${userId}`, 'security-alert', {
+                    subtype: 'device_login',
+                    title: notifTitle,
+                    message: notifBody,
+                    device_id: fingerprint,
+                    device_name: deviceName,
+                    ip_address: ipAddress,
+                    route: '/settings?open=devices',
+                })
+                    .catch(() => { });
+            }
+            (0, notificationService_js_1.sendPushNotificationToUser)(userId, notifTitle, notifBody, {
+                type: 'security',
+                subtype: 'device_login',
+                device_id: fingerprint,
+                device_name: deviceName,
+                route: '/settings?open=devices',
+            }).catch(() => { });
+            if (user.email) {
+                (0, emailService_js_1.sendNewDeviceLoginAlertEmail)(user.email, user.name || 'Pelanggan', {
+                    deviceName,
+                    ipAddress,
+                    loginTimeWib: formatWibTimestamp(),
+                    authMethod: authMethodLabel,
+                }).catch((err) => console.warn('⚠️ [SECURITY EMAIL] Gagal kirim peringatan login perangkat baru:', err?.message || err));
+            }
+        }
+        return isDifferentDeviceLogin;
+    }
+    catch (err) {
+        console.warn('⚠️ [DeviceSecurity] Non-blocking check error:', err?.message || err);
+        return false;
+    }
+};
 const signTokenPair = (user) => {
     const jwtSecret = process.env['JWT_SECRET'];
     if (!jwtSecret)
@@ -221,10 +405,19 @@ const saveFcmToken = async (req, res) => {
             res.status(400).json({ success: false, message: 'FCM Token wajib dikirim' });
             return;
         }
+        const [prevRows] = await database_1.default.query('SELECT user_id FROM user_device_tokens WHERE fcm_token = ? AND user_id != ?', [fcm_token, userId]);
+        const samePhoneAccountSwitch = Array.isArray(prevRows) && prevRows.length > 0;
+        if (samePhoneAccountSwitch) {
+            await database_1.default.query('DELETE FROM user_device_tokens WHERE fcm_token = ? AND user_id != ?', [fcm_token, userId]);
+        }
         await database_1.default.query(`INSERT INTO user_device_tokens (user_id, fcm_token, platform)
        VALUES (?, ?, ?)
        ON DUPLICATE KEY UPDATE platform = VALUES(platform), updated_at = NOW()`, [userId, fcm_token, platform]);
-        res.status(200).json({ success: true, message: 'FCM token berhasil disinkronkan' });
+        res.status(200).json({
+            success: true,
+            message: 'FCM token berhasil disinkronkan',
+            data: { same_phone_account_switch: samePhoneAccountSwitch },
+        });
     }
     catch (error) {
         console.error('Error save FCM token:', error);
@@ -493,6 +686,7 @@ const login = async (req, res) => {
             return;
         }
         const { token, refresh_token } = signTokenPair({ id: user.id, email: user.email, role: user.role, ver: user.token_version });
+        void handlePostLoginDeviceSecurity(req, user, 'Email & Kata Sandi');
         if (user.role === 'mitra' && Number(user.is_verified) !== 1) {
             applyMitraPendingAuthLog(res, {
                 userId: user.id,
@@ -938,6 +1132,17 @@ const googleLogin = async (req, res) => {
             }
         }
         const { token, refresh_token } = signTokenPair({ id: user.id, email: user.email, role: user.role, ver: user.token_version });
+        if (users.length > 0) {
+            void handlePostLoginDeviceSecurity(req, user, 'Google Sign-In');
+        }
+        else {
+            void ensureKnownDevicesTable().then(() => {
+                const { fingerprint, deviceName, ipAddress } = extractClientDeviceInfo(req);
+                return database_1.default.query(`INSERT INTO user_known_devices (user_id, device_fingerprint, device_name, ip_address, last_login_at)
+           VALUES (?, ?, ?, ?, NOW())
+           ON DUPLICATE KEY UPDATE device_name = VALUES(device_name), ip_address = VALUES(ip_address), last_login_at = NOW()`, [user.id, fingerprint, deviceName, ipAddress]);
+            }).catch(() => { });
+        }
         res.locals['userId'] = user.id;
         res.locals['role'] = user.role;
         if (user.role === 'mitra' && Number(user.is_verified) !== 1) {
@@ -1786,6 +1991,7 @@ const verifyLoginOtp = async (req, res) => {
             role: user.role,
             ver: user.token_version,
         });
+        void handlePostLoginDeviceSecurity(req, user, 'Verifikasi 2 Langkah (2FA OTP)');
         res.locals['userId'] = user.id;
         res.locals['role'] = user.role;
         if (user.role === 'mitra' && Number(user.is_verified) !== 1) {
@@ -1953,6 +2159,33 @@ const verifyTwoFactorOtp = async (req, res) => {
         const enabledVal = action === 'disable' ? 0 : 1;
         await database_1.default.query('UPDATE user_otps SET is_used = 1 WHERE id = ?', [otpRow.id]);
         await database_1.default.query('UPDATE users SET two_factor_enabled = ? WHERE id = ?', [enabledVal, userId]);
+        const twoFaTitle = enabledVal === 1
+            ? 'Autentikasi 2 Langkah (2FA) Aktif'
+            : 'Autentikasi 2 Langkah (2FA) Dinonaktifkan';
+        const twoFaBody = enabledVal === 1
+            ? 'Keamanan akun DinoyoCraft Anda kini dilindungi verifikasi OTP Email setiap kali masuk.'
+            : 'Verifikasi 2 langkah (2FA) pada akun DinoyoCraft Anda telah dimatikan.';
+        const twoFaSubtype = enabledVal === 1 ? '2fa_enabled' : '2fa_disabled';
+        await database_1.default
+            .query(`INSERT INTO notifications (user_id, title, message, type)
+         VALUES (?, ?, ?, 'account')`, [userId, twoFaTitle, twoFaBody])
+            .catch(() => { });
+        if ((0, pusher_js_1.isPusherAvailable)()) {
+            pusher_js_1.default
+                .trigger(`user-${userId}`, 'security-alert', {
+                subtype: twoFaSubtype,
+                title: twoFaTitle,
+                message: twoFaBody,
+                two_factor_enabled: Boolean(enabledVal),
+                route: '/settings',
+            })
+                .catch(() => { });
+        }
+        (0, notificationService_js_1.sendPushNotificationToUser)(Number(userId), twoFaTitle, twoFaBody, {
+            type: 'security',
+            subtype: twoFaSubtype,
+            route: '/settings',
+        }).catch(() => { });
         res.status(200).json({
             success: true,
             message: enabledVal === 1
@@ -2025,7 +2258,37 @@ const changePassword = async (req, res) => {
     }
 };
 exports.changePassword = changePassword;
-const logoutOtherDevices = async (_req, res) => {
+const getKnownDevices = async (req, res) => {
+    try {
+        const userId = res.locals['userId'];
+        if (!userId) {
+            res.status(401).json({ success: false, message: 'Unauthorized' });
+            return;
+        }
+        await ensureKnownDevicesTable();
+        const { fingerprint } = extractClientDeviceInfo(req);
+        const [rows] = await database_1.default.query(`SELECT id, device_fingerprint, device_name, ip_address, last_login_at
+       FROM user_known_devices
+       WHERE user_id = ?
+       ORDER BY last_login_at DESC`, [userId]);
+        res.status(200).json({
+            success: true,
+            data: (rows || []).map((r) => ({
+                id: String(r.device_fingerprint || r.id),
+                name: r.device_name || 'Perangkat Terhubung',
+                ip_address: r.ip_address || '-',
+                last_login_at: r.last_login_at,
+                is_current: String(r.device_fingerprint) === fingerprint,
+            })),
+        });
+    }
+    catch (error) {
+        console.error('Error getKnownDevices:', error);
+        res.status(500).json({ success: false, message: 'Gagal memuat daftar perangkat.' });
+    }
+};
+exports.getKnownDevices = getKnownDevices;
+const logoutOtherDevices = async (req, res) => {
     try {
         const userId = res.locals['userId'];
         if (!userId) {
@@ -2034,6 +2297,12 @@ const logoutOtherDevices = async (_req, res) => {
         }
         await database_1.default.query('UPDATE users SET token_version = token_version + 1 WHERE id = ?', [userId]);
         (0, authMiddleware_js_1.invalidateUserAuthCache)(Number(userId));
+        await ensureKnownDevicesTable()
+            .then(() => {
+            const { fingerprint } = extractClientDeviceInfo(req);
+            return database_1.default.query('DELETE FROM user_known_devices WHERE user_id = ? AND device_fingerprint != ?', [userId, fingerprint]);
+        })
+            .catch(() => { });
         const [users] = await database_1.default.query('SELECT id, email, role, token_version FROM users WHERE id = ? LIMIT 1', [userId]);
         if (!users || users.length === 0) {
             res.status(404).json({ success: false, message: 'Pengguna tidak ditemukan.' });

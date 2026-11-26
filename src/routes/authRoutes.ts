@@ -16,6 +16,7 @@ import {
   requestTwoFactorOtp,
   verifyTwoFactorOtp,
   changePassword,
+  getKnownDevices,
   logoutOtherDevices,
   googleLogin,
   getProfile,
@@ -77,6 +78,7 @@ router.post('/reset-password', otpVerifyRateLimiter, validateZod(resetPasswordSc
 router.post('/2fa/request-otp', verifyToken, otpSendRateLimiter, validateZod(requestTwoFactorOtpSchema), requestTwoFactorOtp);
 router.post('/2fa/verify-otp', verifyToken, otpVerifyRateLimiter, validateZod(verifyTwoFactorOtpSchema), verifyTwoFactorOtp);
 router.put('/change-password', verifyToken, validateZod(changePasswordSchema), changePassword);
+router.get('/devices', verifyToken, getKnownDevices);
 router.post('/logout-other-devices', verifyToken, logoutOtherDevices);
 
 // Refresh Token (perpanjangan sesi mobile)

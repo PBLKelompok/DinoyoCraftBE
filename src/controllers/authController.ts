@@ -1,11 +1,199 @@
-import { sendOTPEmail, isEmailConfigured } from '../utils/emailService.js';
+import { sendOTPEmail, sendNewDeviceLoginAlertEmail, isEmailConfigured } from '../utils/emailService.js';
 import { Request, Response } from 'express';
+import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { OAuth2Client } from 'google-auth-library';
 import db from '../config/database';
+import pusher, { isPusherAvailable } from '../utils/pusher.js';
+import { sendPushNotificationToUser } from '../services/notificationService.js';
 import { getUploadedFileUrl } from '../middlewares/uploadMiddleware.js';
 import { invalidateUserAuthCache } from '../middlewares/authMiddleware.js';
+
+let knownDevicesTableReady = false;
+
+const ensureKnownDevicesTable = async (): Promise<void> => {
+  if (knownDevicesTableReady) return;
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS user_known_devices (
+      id INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+      user_id INT UNSIGNED NOT NULL,
+      device_fingerprint VARCHAR(191) NOT NULL,
+      device_name VARCHAR(255) NOT NULL,
+      ip_address VARCHAR(100) DEFAULT NULL,
+      last_login_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE KEY uniq_user_device (user_id, device_fingerprint),
+      KEY idx_ukd_user (user_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+  knownDevicesTableReady = true;
+};
+
+const extractClientDeviceInfo = (req: Request): {
+  fingerprint: string;
+  deviceName: string;
+  ipAddress: string;
+} => {
+  const rawDeviceId = String(
+    req.headers['x-device-id'] || (req.body && req.body.device_id) || ''
+  ).trim();
+  const rawDeviceName = String(
+    req.headers['x-device-name'] || (req.body && req.body.device_name) || ''
+  ).trim();
+  const ua = String(req.headers['user-agent'] || '').trim();
+
+  let deviceName = rawDeviceName;
+  if (!deviceName) {
+    if (/android/i.test(ua)) {
+      deviceName = 'Perangkat Android';
+    } else if (/iphone|ipad|ios/i.test(ua)) {
+      deviceName = 'Perangkat iOS';
+    } else if (/windows/i.test(ua)) {
+      deviceName = 'Browser Web (Windows)';
+    } else if (/macintosh|mac os/i.test(ua)) {
+      deviceName = 'Browser Web (macOS)';
+    } else if (/linux/i.test(ua)) {
+      deviceName = 'Browser Web (Linux)';
+    } else {
+      deviceName = 'Perangkat Lain';
+    }
+  }
+
+  const fingerprint = rawDeviceId
+    ? rawDeviceId.slice(0, 180)
+    : `ua_${crypto
+        .createHash('sha256')
+        .update(ua || deviceName)
+        .digest('hex')
+        .slice(0, 32)}`;
+
+  const forwarded = String(req.headers['x-forwarded-for'] || '')
+    .split(',')[0]
+    .trim();
+  const rawIp = forwarded || String(req.headers['x-real-ip'] || req.ip || '-').trim();
+  const ipAddress = rawIp.replace(/^::ffff:/, '') || '-';
+
+  return { fingerprint, deviceName: deviceName.slice(0, 240), ipAddress: ipAddress.slice(0, 95) };
+};
+
+const formatWibTimestamp = (date: Date = new Date()): string => {
+  try {
+    return (
+      new Intl.DateTimeFormat('id-ID', {
+        timeZone: 'Asia/Jakarta',
+        day: '2-digit',
+        month: 'short',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false,
+      }).format(date) + ' WIB'
+    );
+  } catch {
+    return date.toISOString();
+  }
+};
+
+const handlePostLoginDeviceSecurity = async (
+  req: Request,
+  user: { id: number; name?: string; email?: string; role?: string },
+  authMethodLabel: string
+): Promise<boolean> => {
+  try {
+    await ensureKnownDevicesTable();
+    const { fingerprint, deviceName, ipAddress } = extractClientDeviceInfo(req);
+    const userId = Number(user.id);
+    if (!userId || isNaN(userId)) return false;
+    if (user.role && user.role !== 'pengunjung') return false;
+
+    const [existingDevices]: any = await db.query(
+      `SELECT device_fingerprint, device_name, last_login_at
+       FROM user_known_devices
+       WHERE user_id = ?
+       ORDER BY last_login_at DESC`,
+      [userId]
+    );
+
+    let isDifferentDeviceLogin = false;
+    if (Array.isArray(existingDevices) && existingDevices.length > 0) {
+      const latestDevice = existingDevices[0];
+      const knownBefore = existingDevices.some(
+        (d: any) => String(d.device_fingerprint) === fingerprint
+      );
+      isDifferentDeviceLogin =
+        !knownBefore || String(latestDevice.device_fingerprint) !== fingerprint;
+    } else {
+      const [tokenRows]: any = await db.query(
+        'SELECT COUNT(*) AS cnt FROM user_device_tokens WHERE user_id = ?',
+        [userId]
+      );
+      if (Number(tokenRows?.[0]?.cnt || 0) > 0) {
+        isDifferentDeviceLogin = true;
+      }
+    }
+
+    await db.query(
+      `INSERT INTO user_known_devices (user_id, device_fingerprint, device_name, ip_address, last_login_at)
+       VALUES (?, ?, ?, ?, NOW())
+       ON DUPLICATE KEY UPDATE
+         device_name = VALUES(device_name),
+         ip_address = VALUES(ip_address),
+         last_login_at = NOW()`,
+      [userId, fingerprint, deviceName, ipAddress]
+    );
+
+    if (isDifferentDeviceLogin) {
+      const notifTitle = 'Login Perangkat Baru Terdeteksi';
+      const notifBody = `Akun Anda baru saja masuk pada perangkat ${deviceName}. Jika ini bukan Anda, segera ubah kata sandi di Pengaturan.`;
+
+      await db
+        .query(
+          `INSERT INTO notifications (user_id, title, message, type)
+           VALUES (?, ?, ?, 'account')`,
+          [userId, notifTitle, notifBody]
+        )
+        .catch(() => {});
+
+      if (isPusherAvailable()) {
+        pusher
+          .trigger(`user-${userId}`, 'security-alert', {
+            subtype: 'device_login',
+            title: notifTitle,
+            message: notifBody,
+            device_id: fingerprint,
+            device_name: deviceName,
+            ip_address: ipAddress,
+            route: '/settings?open=devices',
+          })
+          .catch(() => {});
+      }
+
+      sendPushNotificationToUser(userId, notifTitle, notifBody, {
+        type: 'security',
+        subtype: 'device_login',
+        device_id: fingerprint,
+        device_name: deviceName,
+        route: '/settings?open=devices',
+      }).catch(() => {});
+
+      if (user.email) {
+        sendNewDeviceLoginAlertEmail(user.email, user.name || 'Pelanggan', {
+          deviceName,
+          ipAddress,
+          loginTimeWib: formatWibTimestamp(),
+          authMethod: authMethodLabel,
+        }).catch((err: any) =>
+          console.warn('⚠️ [SECURITY EMAIL] Gagal kirim peringatan login perangkat baru:', err?.message || err)
+        );
+      }
+    }
+
+    return isDifferentDeviceLogin;
+  } catch (err: any) {
+    console.warn('⚠️ [DeviceSecurity] Non-blocking check error:', err?.message || err);
+    return false;
+  }
+};
 
 // ============================================================
 // Helper JWT — Access + Refresh Token Pair
@@ -277,6 +465,18 @@ export const saveFcmToken = async (req: Request, res: Response): Promise<void> =
       return;
     }
 
+    const [prevRows]: any = await db.query(
+      'SELECT user_id FROM user_device_tokens WHERE fcm_token = ? AND user_id != ?',
+      [fcm_token, userId]
+    );
+    const samePhoneAccountSwitch = Array.isArray(prevRows) && prevRows.length > 0;
+    if (samePhoneAccountSwitch) {
+      await db.query(
+        'DELETE FROM user_device_tokens WHERE fcm_token = ? AND user_id != ?',
+        [fcm_token, userId]
+      );
+    }
+
     await db.query(
       `INSERT INTO user_device_tokens (user_id, fcm_token, platform)
        VALUES (?, ?, ?)
@@ -284,7 +484,11 @@ export const saveFcmToken = async (req: Request, res: Response): Promise<void> =
       [userId, fcm_token, platform]
     );
 
-    res.status(200).json({ success: true, message: 'FCM token berhasil disinkronkan' });
+    res.status(200).json({
+      success: true,
+      message: 'FCM token berhasil disinkronkan',
+      data: { same_phone_account_switch: samePhoneAccountSwitch },
+    });
   } catch (error) {
     console.error('Error save FCM token:', error);
     res.status(500).json({ success: false, message: 'Gagal menyimpan FCM token' });
@@ -610,6 +814,8 @@ export const login = async (req: Request, res: Response): Promise<void> => {
     }
 
     const { token, refresh_token } = signTokenPair({ id: user.id, email: user.email, role: user.role, ver: user.token_version });
+
+    void handlePostLoginDeviceSecurity(req, user, 'Email & Kata Sandi');
 
     if (user.role === 'mitra' && Number(user.is_verified) !== 1) {
       applyMitraPendingAuthLog(res, {
@@ -1107,6 +1313,20 @@ export const googleLogin = async (req: Request, res: Response): Promise<void> =>
     }
 
     const { token, refresh_token } = signTokenPair({ id: user.id, email: user.email, role: user.role, ver: user.token_version });
+
+    if (users.length > 0) {
+      void handlePostLoginDeviceSecurity(req, user, 'Google Sign-In');
+    } else {
+      void ensureKnownDevicesTable().then(() => {
+        const { fingerprint, deviceName, ipAddress } = extractClientDeviceInfo(req);
+        return db.query(
+          `INSERT INTO user_known_devices (user_id, device_fingerprint, device_name, ip_address, last_login_at)
+           VALUES (?, ?, ?, ?, NOW())
+           ON DUPLICATE KEY UPDATE device_name = VALUES(device_name), ip_address = VALUES(ip_address), last_login_at = NOW()`,
+          [user.id, fingerprint, deviceName, ipAddress]
+        );
+      }).catch(() => {});
+    }
 
     res.locals['userId'] = user.id;
     res.locals['role'] = user.role;
@@ -2109,6 +2329,8 @@ export const verifyLoginOtp = async (req: Request, res: Response): Promise<void>
       ver: user.token_version,
     });
 
+    void handlePostLoginDeviceSecurity(req, user, 'Verifikasi 2 Langkah (2FA OTP)');
+
     res.locals['userId'] = user.id;
     res.locals['role'] = user.role;
     if (user.role === 'mitra' && Number(user.is_verified) !== 1) {
@@ -2312,6 +2534,42 @@ export const verifyTwoFactorOtp = async (req: Request, res: Response): Promise<v
     await db.query('UPDATE user_otps SET is_used = 1 WHERE id = ?', [otpRow.id]);
     await db.query('UPDATE users SET two_factor_enabled = ? WHERE id = ?', [enabledVal, userId]);
 
+    const twoFaTitle =
+      enabledVal === 1
+        ? 'Autentikasi 2 Langkah (2FA) Aktif'
+        : 'Autentikasi 2 Langkah (2FA) Dinonaktifkan';
+    const twoFaBody =
+      enabledVal === 1
+        ? 'Keamanan akun DinoyoCraft Anda kini dilindungi verifikasi OTP Email setiap kali masuk.'
+        : 'Verifikasi 2 langkah (2FA) pada akun DinoyoCraft Anda telah dimatikan.';
+    const twoFaSubtype = enabledVal === 1 ? '2fa_enabled' : '2fa_disabled';
+
+    await db
+      .query(
+        `INSERT INTO notifications (user_id, title, message, type)
+         VALUES (?, ?, ?, 'account')`,
+        [userId, twoFaTitle, twoFaBody]
+      )
+      .catch(() => {});
+
+    if (isPusherAvailable()) {
+      pusher
+        .trigger(`user-${userId}`, 'security-alert', {
+          subtype: twoFaSubtype,
+          title: twoFaTitle,
+          message: twoFaBody,
+          two_factor_enabled: Boolean(enabledVal),
+          route: '/settings',
+        })
+        .catch(() => {});
+    }
+
+    sendPushNotificationToUser(Number(userId), twoFaTitle, twoFaBody, {
+      type: 'security',
+      subtype: twoFaSubtype,
+      route: '/settings',
+    }).catch(() => {});
+
     res.status(200).json({
       success: true,
       message:
@@ -2394,7 +2652,39 @@ export const changePassword = async (req: Request, res: Response): Promise<void>
   }
 };
 
-export const logoutOtherDevices = async (_req: Request, res: Response): Promise<void> => {
+export const getKnownDevices = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const userId = res.locals['userId'];
+    if (!userId) {
+      res.status(401).json({ success: false, message: 'Unauthorized' });
+      return;
+    }
+    await ensureKnownDevicesTable();
+    const { fingerprint } = extractClientDeviceInfo(req);
+    const [rows]: any = await db.query(
+      `SELECT id, device_fingerprint, device_name, ip_address, last_login_at
+       FROM user_known_devices
+       WHERE user_id = ?
+       ORDER BY last_login_at DESC`,
+      [userId]
+    );
+    res.status(200).json({
+      success: true,
+      data: (rows || []).map((r: any) => ({
+        id: String(r.device_fingerprint || r.id),
+        name: r.device_name || 'Perangkat Terhubung',
+        ip_address: r.ip_address || '-',
+        last_login_at: r.last_login_at,
+        is_current: String(r.device_fingerprint) === fingerprint,
+      })),
+    });
+  } catch (error) {
+    console.error('Error getKnownDevices:', error);
+    res.status(500).json({ success: false, message: 'Gagal memuat daftar perangkat.' });
+  }
+};
+
+export const logoutOtherDevices = async (req: Request, res: Response): Promise<void> => {
   try {
     const userId = res.locals['userId'];
     if (!userId) {
@@ -2404,6 +2694,15 @@ export const logoutOtherDevices = async (_req: Request, res: Response): Promise<
 
     await db.query('UPDATE users SET token_version = token_version + 1 WHERE id = ?', [userId]);
     invalidateUserAuthCache(Number(userId));
+    await ensureKnownDevicesTable()
+      .then(() => {
+        const { fingerprint } = extractClientDeviceInfo(req);
+        return db.query(
+          'DELETE FROM user_known_devices WHERE user_id = ? AND device_fingerprint != ?',
+          [userId, fingerprint]
+        );
+      })
+      .catch(() => {});
     const [users]: any = await db.query(
       'SELECT id, email, role, token_version FROM users WHERE id = ? LIMIT 1',
       [userId]

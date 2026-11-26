@@ -38,4 +38,13 @@ export declare const sendOTPEmail: (toEmail: string, otpCode: string, recipientN
  * Kirim email pemberitahuan resmi bahwa pengajuan penghapusan akun telah disetujui oleh Admin
  */
 export declare const sendAccountDeletionApprovedEmail: (toEmail: string, recipientName?: string) => Promise<void>;
+/**
+ * Kirim email peringatan keamanan ketika terdapat perangkat baru/lain yang login ke akun pelanggan
+ */
+export declare const sendNewDeviceLoginAlertEmail: (toEmail: string, recipientName: string | undefined, details: {
+    deviceName: string;
+    ipAddress?: string;
+    loginTimeWib?: string;
+    authMethod?: string;
+}) => Promise<void>;
 //# sourceMappingURL=emailService.d.ts.map

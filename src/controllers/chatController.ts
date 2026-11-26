@@ -229,7 +229,17 @@ export const sendMessage = async (req: Request, res: Response): Promise<void> =>
 
     // 2. Trigger Pusher agar frontend langsung menerima pesan secara real-time
     const [senderRows]: any = await pool.query(
-      `SELECT u.name, u.role, mp.store_name, COALESCE(NULLIF(TRIM(mp.store_name), ''), u.name) AS display_name
+      `SELECT u.name, u.role, mp.store_name,
+              COALESCE(NULLIF(TRIM(mp.store_name), ''), u.name) AS display_name,
+              CASE
+                WHEN mp.id IS NOT NULL OR u.role = 'mitra' THEN
+                  CASE
+                    WHEN mp.avatar_url IS NOT NULL AND mp.avatar_url != '' AND mp.avatar_url NOT LIKE '%googleusercontent.com%' AND mp.avatar_url NOT LIKE '%google.com%' THEN mp.avatar_url
+                    WHEN u.avatar_url IS NOT NULL AND u.avatar_url != '' AND u.avatar_url NOT LIKE '%googleusercontent.com%' AND u.avatar_url NOT LIKE '%google.com%' THEN u.avatar_url
+                    ELSE NULL
+                  END
+                ELSE NULLIF(u.avatar_url, '')
+              END AS sender_avatar
        FROM users u
        LEFT JOIN mitra_profiles mp ON mp.user_id = u.id
        WHERE u.id = ? LIMIT 1`,
@@ -239,6 +249,7 @@ export const sendMessage = async (req: Request, res: Response): Promise<void> =>
     const senderName = isAdminSender
       ? 'Customer Service'
       : senderRows?.[0]?.display_name || senderRows?.[0]?.name || 'Seseorang';
+    const senderAvatar = isAdminSender ? null : (senderRows?.[0]?.sender_avatar || null);
 
     const channelName = `chat-${Math.min(numericSenderId, numericTargetId)}-${Math.max(numericSenderId, numericTargetId)}`;
     const userTargetChannel = `user-${numericTargetId}`;
@@ -268,6 +279,7 @@ export const sendMessage = async (req: Request, res: Response): Promise<void> =>
           sender_id: numericSenderId,
           receiver_id: numericTargetId,
           sender_name: senderName,
+          sender_avatar: senderAvatar,
           store_name: isAdminSender ? 'Customer Service' : senderRows?.[0]?.store_name || senderName,
           is_cs: isAdminSender,
           message: messageText, // Kirim teks asli ke Pusher
@@ -365,7 +377,16 @@ export const getMessages = async (req: Request, res: Response): Promise<void> =>
     const [targetRows]: any = await pool.query(
       `SELECT u.id, u.name, u.role, u.last_seen_at,
               (u.last_seen_at IS NOT NULL AND u.last_seen_at >= NOW() - INTERVAL 2 MINUTE) AS is_online,
-              mp.store_name
+              mp.store_name,
+              CASE
+                WHEN mp.id IS NOT NULL OR u.role = 'mitra' THEN
+                  CASE
+                    WHEN mp.avatar_url IS NOT NULL AND mp.avatar_url != '' AND mp.avatar_url NOT LIKE '%googleusercontent.com%' AND mp.avatar_url NOT LIKE '%google.com%' THEN mp.avatar_url
+                    WHEN u.avatar_url IS NOT NULL AND u.avatar_url != '' AND u.avatar_url NOT LIKE '%googleusercontent.com%' AND u.avatar_url NOT LIKE '%google.com%' THEN u.avatar_url
+                    ELSE NULL
+                  END
+                ELSE NULLIF(u.avatar_url, '')
+              END AS avatar_url
        FROM users u
        LEFT JOIN mitra_profiles mp ON mp.user_id = u.id
        WHERE u.id = ? LIMIT 1`,
@@ -429,6 +450,7 @@ export const getMessages = async (req: Request, res: Response): Promise<void> =>
         id: targetUser.id,
         name: targetUser.role === 'admin' ? 'Customer Service' : (targetUser.store_name || targetUser.name),
         role: targetUser.role,
+        avatar_url: targetUser.role === 'admin' ? null : (targetUser.avatar_url || null),
         is_cs: targetUser.role === 'admin',
         is_online: targetIsOnline,
         last_seen_at: targetUser.last_seen_at || null,
