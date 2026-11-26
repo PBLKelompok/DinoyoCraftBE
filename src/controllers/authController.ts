@@ -695,6 +695,7 @@ export const loginMitra = async (req: Request, res: Response): Promise<void> => 
 
     const query = `
       SELECT u.id, u.name, u.email, u.password_hash, u.role, u.is_active, u.token_version,
+             COALESCE(NULLIF(m.avatar_url, ''), u.avatar_url) AS avatar_url,
              m.store_name, m.is_verified, m.rejection_reason
       FROM users u 
       LEFT JOIN mitra_profiles m ON u.id = m.user_id 
@@ -807,6 +808,7 @@ export const loginMitra = async (req: Request, res: Response): Promise<void> => 
         email: user.email,
         role: user.role,
         store_name: user.store_name,
+        avatar_url: user.avatar_url || null,
         is_verified: user.is_verified,
         rejection_reason: user.rejection_reason
       },
@@ -934,7 +936,8 @@ export const googleLogin = async (req: Request, res: Response): Promise<void> =>
 
     const query = `
       SELECT u.id, u.name, COALESCE(NULLIF(TRIM(u.username), ''), SUBSTRING_INDEX(u.email, '@', 1)) AS username,
-             u.phone, u.birth_date, u.gender, u.email, u.role, u.is_active, u.google_id, u.avatar_url,
+             u.phone, u.birth_date, u.gender, u.email, u.role, u.is_active, u.google_id,
+             COALESCE(NULLIF(m.avatar_url, ''), u.avatar_url) AS avatar_url,
              u.token_version, u.two_factor_enabled, u.password_changed_at,
              (u.password_hash IS NOT NULL AND u.password_hash != '') AS has_password,
              m.store_name, m.is_verified, m.rejection_reason
@@ -1174,7 +1177,8 @@ export const getProfile = async (_req: Request, res: Response) => {
     if (!userId) return res.status(401).json({ success: false, message: 'Unauthorized' });
 
     const [rows]: any = await db.query(
-      `SELECT u.id, u.name, u.email, u.role, u.avatar_url,
+      `SELECT u.id, u.name, u.email, u.role,
+              COALESCE(NULLIF(m.avatar_url, ''), u.avatar_url) AS avatar_url,
               u.phone, u.birth_date, u.gender,
               u.two_factor_enabled, u.password_changed_at, u.google_id,
               (u.password_hash IS NOT NULL AND u.password_hash != '') AS has_password,
@@ -1335,8 +1339,8 @@ export const updateProfile = async (req: Request, res: Response) => {
       // Buat baru jika belum ada
       await db.query(
         `INSERT INTO mitra_profiles 
-         (user_id, store_name, whatsapp_number, workshop_address, started_year, description, website, instagram, banner_url, is_verified, is_active) 
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+         (user_id, store_name, whatsapp_number, workshop_address, started_year, description, website, instagram, avatar_url, banner_url, is_verified, is_active) 
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
         [
           userId,
           storeName ?? null,
@@ -1346,6 +1350,7 @@ export const updateProfile = async (req: Request, res: Response) => {
           description ?? null,
           website ?? null,
           instagram ?? null,
+          avatarPath ?? null,
           bannerPath,
           userRole === 'admin' ? 1 : 0
         ]
@@ -1354,7 +1359,8 @@ export const updateProfile = async (req: Request, res: Response) => {
 
     // Ambil data profil terbaru
     const [rows]: any = await db.query(
-      `SELECT u.id, u.name, u.username, u.email, u.role, u.avatar_url,
+      `SELECT u.id, u.name, u.username, u.email, u.role,
+              COALESCE(NULLIF(m.avatar_url, ''), u.avatar_url) AS avatar_url,
               u.phone, u.birth_date, u.gender,
               m.store_name, m.whatsapp_number, m.workshop_address, 
               m.started_year, m.description, m.website, m.instagram, 

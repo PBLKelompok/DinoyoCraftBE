@@ -792,9 +792,13 @@ const logHttpRequest = (req, res, durationMs) => {
     const rawPath = req.originalUrl || req.url || req.path || '/';
     const cleanPath = rawPath.split('?')[0] || '/';
     // Abaikan preflight, health check, endpoint polling rutin sukses, serta aset statis agar tidak memicu Pusher loop
+    if (res.locals['skipSystemLog'] === true)
+        return;
     if (req.method === 'OPTIONS' || req.method === 'HEAD')
         return;
     if (cleanPath === '/health' || cleanPath === '/api/health')
+        return;
+    if (cleanPath === '/api/admin/logs/pusher-auth')
         return;
     if (cleanPath === '/api/chat/heartbeat' && res.statusCode < 400)
         return;

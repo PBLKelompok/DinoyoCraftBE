@@ -229,6 +229,7 @@ export declare const aiChatSchema: z.ZodObject<{
         id: "id";
     }>>;
     role_context: z.ZodOptional<z.ZodEnum<{
+        claybot: "claybot";
         customer: "customer";
         mitra: "mitra";
         store_bot: "store_bot";

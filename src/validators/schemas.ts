@@ -287,7 +287,7 @@ export const aiChatSchema = z.object({
     .max(12)
     .optional(),
   locale: z.enum(['id', 'en']).optional(),
-  role_context: z.enum(['customer', 'mitra', 'store_bot']).optional(),
+  role_context: z.enum(['customer', 'mitra', 'store_bot', 'claybot']).optional(),
   store_name: z.string().max(150).optional().nullable(),
   store_user_id: z.union([z.string(), z.number()]).optional().nullable(),
   target_user_id: z.union([z.string(), z.number()]).optional().nullable(),

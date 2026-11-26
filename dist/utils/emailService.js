@@ -7,7 +7,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.sendOTPEmail = exports.sendEmail = exports.getTransporter = exports.isEmailConfigured = exports.getDefaultFromAddress = exports.getResendApiKey = void 0;
+exports.sendAccountDeletionApprovedEmail = exports.sendOTPEmail = exports.sendEmail = exports.getTransporter = exports.isEmailConfigured = exports.getDefaultFromAddress = exports.getResendApiKey = void 0;
 require("dotenv/config");
 const nodemailer_1 = __importDefault(require("nodemailer"));
 const RESEND_API_ENDPOINT = 'https://api.resend.com/emails';
@@ -345,4 +345,97 @@ const sendOTPEmail = async (toEmail, otpCode, recipientName = 'Pengguna', purpos
     }
 };
 exports.sendOTPEmail = sendOTPEmail;
+/**
+ * Kirim email pemberitahuan resmi bahwa pengajuan penghapusan akun telah disetujui oleh Admin
+ */
+const sendAccountDeletionApprovedEmail = async (toEmail, recipientName = 'Pelanggan') => {
+    const safeName = escapeHtml((recipientName || 'Pelanggan').trim());
+    const safeEmail = escapeHtml(toEmail.trim());
+    const subject = 'Penghapusan Akun Disetujui — DinoyoCraft';
+    const html = `
+    <!DOCTYPE html>
+    <html lang="id">
+    <head>
+      <meta charset="UTF-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <title>${subject}</title>
+    </head>
+    <body style="margin: 0; padding: 0; background-color: #0D0D10; font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #FFFFFF;">
+      <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" style="background-color: #0D0D10; padding: 32px 14px;">
+        <tr>
+          <td align="center">
+            <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" style="max-width: 520px; background-color: #16161B; border-radius: 20px; border: 1px solid rgba(255, 255, 255, 0.16); overflow: hidden;">
+              <tr>
+                <td style="padding: 24px 28px 20px; background-color: rgba(10, 10, 13, 0.65); border-bottom: 1px solid rgba(255, 255, 255, 0.12);">
+                  <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%">
+                    <tr>
+                      <td align="left" valign="middle">
+                        <table role="presentation" border="0" cellpadding="0" cellspacing="0">
+                          <tr>
+                            <td valign="middle" style="width: 34px; height: 34px; background-color: #FFFFFF; border-radius: 10px; text-align: center; padding: 4px;">
+                              <img src="${EMAIL_ASSETS.logo}" alt="DinoyoCraft" width="24" height="24" style="width: 24px; height: 24px; object-fit: contain; display: block; margin: 0 auto; border: 0;" />
+                            </td>
+                            <td valign="middle" style="padding-left: 11px;">
+                              <span style="font-size: 16px; font-weight: 700; color: #FFFFFF;">DinoyoCraft</span>
+                            </td>
+                          </tr>
+                        </table>
+                      </td>
+                      <td align="right" valign="middle">
+                        <span style="display: inline-block; font-family: monospace; font-size: 10px; font-weight: 600; letter-spacing: 0.12em; color: #FCA5A5; text-transform: uppercase; border: 1px solid rgba(248, 113, 113, 0.35); border-radius: 999px; padding: 5px 10px; background-color: rgba(239, 68, 68, 0.12);">
+                          AKUN DIHAPUS
+                        </span>
+                      </td>
+                    </tr>
+                  </table>
+                </td>
+              </tr>
+              <tr>
+                <td style="padding: 32px 28px 28px;">
+                  <h1 style="margin: 0 0 16px; text-align: center; font-size: 21px; font-weight: 700; color: #FFFFFF; line-height: 1.35;">
+                    Pengajuan Penghapusan Akun Disetujui
+                  </h1>
+                  <p style="margin: 0 0 12px; text-align: center; font-size: 14.5px; color: #F4F4F5; line-height: 1.6;">
+                    Halo <strong style="color: #FFFFFF;">${safeName}</strong>,
+                  </p>
+                  <p style="margin: 0 auto 22px; max-width: 420px; text-align: center; font-size: 13.5px; color: #D4D4D8; line-height: 1.65;">
+                    Permohonan penghapusan akun DinoyoCraft Anda (<strong style="color: #FFFFFF;">${safeEmail}</strong>) telah ditinjau dan <strong style="color: #FFFFFF;">disetujui</strong> oleh tim Admin DinoyoCraft.
+                  </p>
+                  <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" style="background-color: rgba(10, 10, 14, 0.65); border: 1px solid rgba(255, 255, 255, 0.16); border-radius: 14px; margin-bottom: 20px;">
+                    <tr>
+                      <td style="padding: 18px 20px; font-size: 12.5px; color: #D4D4D8; line-height: 1.65;">
+                        &bull; Seluruh sesi login aktif pada perangkat Anda telah diakhiri secara otomatis.<br/>
+                        &bull; Akun Anda kini telah dinonaktifkan dan tidak dapat lagi digunakan untuk masuk.<br/>
+                        &bull; Terima kasih telah menjadi bagian dari komunitas pecinta keramik Dinoyo, Malang.
+                      </td>
+                    </tr>
+                  </table>
+                  <p style="margin: 0; text-align: center; font-size: 12px; color: #A1A1AA; line-height: 1.6;">
+                    Apabila Anda memiliki pertanyaan lebih lanjut, silakan hubungi <a href="mailto:support@dinoyocraft.my.id" style="color: #E4E4E7;">support@dinoyocraft.my.id</a>.
+                  </p>
+                </td>
+              </tr>
+              <tr>
+                <td align="center" style="padding: 18px 28px 22px; background-color: rgba(8, 8, 11, 0.62); border-top: 1px solid rgba(255, 255, 255, 0.1);">
+                  <div style="font-size: 11.5px; color: #A1A1AA; line-height: 1.65;">
+                    <strong style="color: #F4F4F5;">DinoyoCraft</strong> &mdash; Sentra Kerajinan Keramik Dinoyo, Malang<br/>
+                    &copy; ${new Date().getFullYear()} DinoyoCraft
+                  </div>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+      </table>
+    </body>
+    </html>
+  `;
+    await (0, exports.sendEmail)({
+        from: (0, exports.getDefaultFromAddress)(),
+        to: toEmail,
+        subject,
+        html,
+    });
+};
+exports.sendAccountDeletionApprovedEmail = sendAccountDeletionApprovedEmail;
 //# sourceMappingURL=emailService.js.map

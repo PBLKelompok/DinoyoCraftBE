@@ -6,6 +6,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.updateAiSettings = exports.verifyAiApiKey = exports.getAiSettings = void 0;
 const AiSetting_js_1 = __importDefault(require("../models/AiSetting.js"));
 const database_js_1 = __importDefault(require("../config/database.js"));
+const aiController_js_1 = require("./aiController.js");
 const aiProviderService_js_1 = require("../services/aiProviderService.js");
 async function getCatalogStats() {
     try {
@@ -170,6 +171,7 @@ const updateAiSettings = async (req, res) => {
             api_key: nextEncryptedKey,
             system_prompt: nextPrompt,
         }, { where: { id: existing.id } });
+        (0, aiController_js_1.clearDailyInsightCache)();
         const { catalogCount, storeCount } = await getCatalogStats();
         res.json({
             success: true,

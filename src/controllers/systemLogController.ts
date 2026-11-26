@@ -904,6 +904,7 @@ export const purgeSystemLog = async (req: Request, res: Response): Promise<void>
 //  11. POST /api/admin/logs/pusher-auth — Otorisasi Private Channel (§8.4, §12)
 // ------------------------------------------------------------
 export const authorizePusherChannel = async (req: Request, res: Response): Promise<void> => {
+  res.locals['skipSystemLog'] = true;
   try {
     const socketId = req.body?.socket_id;
     const channelName = req.body?.channel_name;
@@ -915,7 +916,7 @@ export const authorizePusherChannel = async (req: Request, res: Response): Promi
 
     const pusher = getPusherClient();
     if (!pusher) {
-      res.status(503).json({ success: false, message: 'Pusher belum dikonfigurasi' });
+      res.status(200).json({ success: false, disabled: true, auth: '' });
       return;
     }
 
@@ -923,7 +924,7 @@ export const authorizePusherChannel = async (req: Request, res: Response): Promi
     res.status(200).send(authResponse);
   } catch (err: any) {
     console.error('Error authorizePusherChannel:', err);
-    res.status(403).json({ success: false, message: 'Gagal mengotorisasi channel Pusher' });
+    res.status(200).json({ success: false, disabled: true, auth: '' });
   }
 };
 

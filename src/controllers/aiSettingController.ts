@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import AiSetting from '../models/AiSetting.js';
 import pool from '../config/database.js';
+import { clearDailyInsightCache } from './aiController.js';
 import {
   DEFAULT_DINOYOCRAFT_SYSTEM_PROMPT,
   LEGACY_SYSTEM_PROMPTS,
@@ -225,6 +226,7 @@ export const updateAiSettings = async (req: Request, res: Response) => {
       },
       { where: { id: existing.id } }
     );
+    clearDailyInsightCache();
 
     const { catalogCount, storeCount } = await getCatalogStats();
 

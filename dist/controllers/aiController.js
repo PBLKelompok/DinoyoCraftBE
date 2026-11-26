@@ -41,7 +41,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.chatWithClayBot = exports.getAiHistory = exports.analyzeWithAI = void 0;
+exports.getDailyDashboardInsight = exports.clearDailyInsightCache = exports.chatWithClayBot = exports.getAiHistory = exports.analyzeWithAI = void 0;
 const database_js_1 = __importDefault(require("../config/database.js"));
 const response_js_1 = require("../utils/response.js");
 const piiAnonymizer_js_1 = require("../utils/piiAnonymizer.js");
@@ -495,7 +495,6 @@ const chatWithClayBot = async (req, res) => {
         const textForChatHistory = original_message !== undefined && original_message !== null
             ? String(original_message).trim()
             : userMessage;
-        const shouldSaveToChat = save_to_chat !== false;
         if (!userMessage) {
             (0, response_js_1.sendBadRequest)(res, 'Pesan tidak boleh kosong.');
             return;
@@ -504,11 +503,26 @@ const chatWithClayBot = async (req, res) => {
         const authRole = res.locals['role'];
         const rawAuthUserId = res.locals['userId'];
         const authUserId = rawAuthUserId ? Number(rawAuthUserId) : undefined;
+        const isStandaloneClayBot = role_context === 'claybot';
         const resolvedRoleContext = role_context === 'mitra' || role_context === 'store_bot' || role_context === 'customer'
             ? role_context
-            : authRole === 'mitra'
-                ? 'mitra'
-                : 'customer';
+            : isStandaloneClayBot
+                ? 'customer'
+                : authRole === 'mitra'
+                    ? 'mitra'
+                    : 'customer';
+        // Riwayat pesan TIDAK disimpan ke tabel messages Customer Service saat customer
+        // memakai ClayBot mandiri (/chatbot). Hanya disimpan ketika customer benar-benar
+        // mengirim pesan di ruang chat Customer Service / Toko dan Asisten AI menjawab.
+        const hasExplicitTargetUser = target_user_id !== undefined &&
+            target_user_id !== null &&
+            String(target_user_id).trim() !== '';
+        const shouldSaveToChat = !isStandaloneClayBot &&
+            (save_to_chat === true ||
+                (save_to_chat !== false &&
+                    (resolvedRoleContext === 'store_bot' ||
+                        original_message !== undefined ||
+                        hasExplicitTargetUser)));
         // 1. Cek guardrail platform KETAT sebelum menyentuh LLM atau fallback katalog
         //    Termasuk deteksi serangan sandwich (misal: selipkan copas code error di antara pertanyaan vas keramik)
         const guardrail = (0, aiProviderService_js_1.evaluatePlatformGuardrail)(userMessage, lang);
@@ -798,4 +812,177 @@ const chatWithClayBot = async (req, res) => {
     }
 };
 exports.chatWithClayBot = chatWithClayBot;
+const dailyInsightCache = new Map();
+const clearDailyInsightCache = () => {
+    dailyInsightCache.clear();
+};
+exports.clearDailyInsightCache = clearDailyInsightCache;
+const getWibDateKey = () => {
+    const now = new Date(Date.now() + 7 * 60 * 60 * 1000);
+    return now.toISOString().slice(0, 10);
+};
+const getDailyDashboardInsight = async (req, res) => {
+    res.locals['skipSystemLog'] = true;
+    try {
+        const authRole = String(res.locals['role'] || req.user?.role || '').toLowerCase();
+        const authUserId = Number(res.locals['userId'] || req.user?.id || 0);
+        const requestedScope = String(req.query.scope || authRole).toLowerCase();
+        const scope = requestedScope === 'admin' && authRole === 'admin' ? 'admin' : 'mitra';
+        const dateKey = getWibDateKey();
+        const settings = await (0, aiProviderService_js_1.getEffectiveAiSettings)();
+        if (!settings.apiKey) {
+            (0, response_js_1.sendSuccess)(res, {
+                configured: false,
+                active: Boolean(settings.isAutoReplyActive),
+                provider_label: null,
+                model_name: null,
+                date: dateKey,
+                insight: null,
+                status_message: scope === 'admin'
+                    ? 'API Key Asisten AI belum dipasang pada sistem. Silakan atur API Key di menu Pengaturan AI untuk mengaktifkan analisis platform harian otomatis.'
+                    : 'API Key Asisten AI belum dipasang pada sistem. Tips AI harian akan aktif otomatis setelah Admin mengonfigurasi API Key penyedia AI.',
+            }, 'Status analisis AI berhasil dimuat.');
+            return;
+        }
+        const keyFp = settings.apiKey.slice(-6);
+        const cacheKey = `${scope}:${scope === 'admin' ? 'global' : authUserId}:${dateKey}:${settings.provider}:${settings.modelName}:${keyFp}`;
+        const cached = dailyInsightCache.get(cacheKey);
+        if (cached && cached.dateKey === dateKey) {
+            (0, response_js_1.sendSuccess)(res, {
+                configured: true,
+                active: Boolean(settings.isAutoReplyActive),
+                provider_label: cached.providerLabel,
+                model_name: cached.modelName,
+                date: dateKey,
+                insight: cached.insight,
+                cached: true,
+            }, 'Analisis AI harian berhasil dimuat.');
+            return;
+        }
+        let promptContext = '';
+        let systemInstruction = '';
+        if (scope === 'admin') {
+            const [[storeStats], [orderStats], [pendingVerif], [pendingReports], [pendingDeletions], [topStores],] = await Promise.all([
+                database_js_1.default.query('SELECT COUNT(*) AS active_stores FROM mitra_profiles WHERE is_active = 1 AND is_verified = 1'),
+                database_js_1.default.query(`SELECT COUNT(*) AS total_orders,
+                  COALESCE(SUM(CASE WHEN status IN ('paid','packed','shipped','completed') THEN total_amount ELSE 0 END), 0) AS total_omzet
+           FROM orders
+           WHERE MONTH(created_at) = MONTH(NOW()) AND YEAR(created_at) = YEAR(NOW())`),
+                database_js_1.default.query('SELECT COUNT(*) AS cnt FROM mitra_profiles WHERE is_verified = 0 AND is_active = 1'),
+                database_js_1.default.query("SELECT COUNT(*) AS cnt FROM reports WHERE LOWER(status) = 'pending'").catch(() => [[{ cnt: 0 }]]),
+                database_js_1.default.query("SELECT COUNT(*) AS cnt FROM account_deletions WHERE status = 'pending'").catch(() => [[{ cnt: 0 }]]),
+                database_js_1.default.query(`SELECT m.store_name, COUNT(o.id) AS order_cnt
+           FROM mitra_profiles m
+           LEFT JOIN orders o ON o.mitra_id = m.id AND o.status != 'cancelled'
+           WHERE m.is_active = 1 AND m.is_verified = 1
+           GROUP BY m.id, m.store_name
+           ORDER BY order_cnt DESC
+           LIMIT 2`),
+            ]);
+            const activeStores = Number(storeStats?.[0]?.active_stores || 0);
+            const totalOrders = Number(orderStats?.[0]?.total_orders || 0);
+            const totalOmzet = Number(orderStats?.[0]?.total_omzet || 0);
+            const verifCnt = Number(pendingVerif?.[0]?.cnt || 0);
+            const modCnt = Number(pendingReports?.[0]?.cnt || 0) + Number(pendingDeletions?.[0]?.cnt || 0);
+            const topStoreNames = Array.isArray(topStores) && topStores.length > 0
+                ? topStores.map((s) => `${s.store_name} (${s.order_cnt} pesanan)`).join(', ')
+                : 'belum ada transaksi dominan';
+            systemInstruction =
+                'Anda adalah Analis Operasional Eksekutif DinoyoCraft Malang. Berikan tepat 2 kalimat ringkas (maksimal 260 karakter, Bahasa Indonesia profesional, tanpa tanda kutip pembuka/penutup, tanpa bullet/markdown) yang merangkum kondisi operasional platform hari ini dan 1 prioritas tindakan Admin berdasarkan data nyata.';
+            promptContext = `Tanggal: ${dateKey}. Toko pengrajin aktif: ${activeStores}. Transaksi bulan ini: ${totalOrders} pesanan (Omzet Rp ${totalOmzet.toLocaleString('id-ID')}). Pengajuan verifikasi toko menunggu: ${verifCnt}. Laporan/hapus akun menunggu moderasi: ${modCnt}. Toko teraktif: ${topStoreNames}. Buat analisis harian Admin hari ini.`;
+        }
+        else {
+            const [mitraRows] = await database_js_1.default.query('SELECT id, store_name, rating, total_reviews FROM mitra_profiles WHERE user_id = ? LIMIT 1', [authUserId]);
+            const mitra = mitraRows?.[0];
+            const mitraId = Number(mitra?.id || 0);
+            const storeName = String(mitra?.store_name || 'Toko Keramik Anda');
+            let prodCount = 0;
+            let lowStockName = '';
+            let topProductName = '';
+            let pendingOrders = 0;
+            let totalOrders7d = 0;
+            if (mitraId > 0) {
+                const [[prodSummary], [topProd], [lowProd], [ordSummary]] = await Promise.all([
+                    database_js_1.default.query('SELECT COUNT(*) AS cnt FROM products WHERE mitra_id = ? AND (is_deleted = 0 OR is_deleted IS NULL)', [mitraId]),
+                    database_js_1.default.query(`SELECT p.name, COALESCE(SUM(oi.quantity), 0) AS sold
+             FROM products p
+             LEFT JOIN order_items oi ON oi.product_id = p.id
+             LEFT JOIN orders o ON o.id = oi.order_id AND o.status != 'cancelled'
+             WHERE p.mitra_id = ? AND (p.is_deleted = 0 OR p.is_deleted IS NULL)
+             GROUP BY p.id, p.name
+             ORDER BY sold DESC, p.id DESC
+             LIMIT 1`, [mitraId]),
+                    database_js_1.default.query(`SELECT name, stock FROM products
+             WHERE mitra_id = ? AND (is_deleted = 0 OR is_deleted IS NULL) AND stock <= 5
+             ORDER BY stock ASC LIMIT 1`, [mitraId]),
+                    database_js_1.default.query(`SELECT
+               SUM(CASE WHEN status IN ('paid', 'packed') THEN 1 ELSE 0 END) AS need_ship,
+               SUM(CASE WHEN created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY) AND status != 'cancelled' THEN 1 ELSE 0 END) AS recent_7d
+             FROM orders
+             WHERE mitra_id = ?`, [mitraId]),
+                ]);
+                prodCount = Number(prodSummary?.[0]?.cnt || 0);
+                topProductName = topProd?.[0]?.name ? `${topProd[0].name} (${topProd[0].sold} terjual)` : '';
+                lowStockName = lowProd?.[0]?.name ? `${lowProd[0].name} (sisa stok ${lowProd[0].stock})` : '';
+                pendingOrders = Number(ordSummary?.[0]?.need_ship || 0);
+                totalOrders7d = Number(ordSummary?.[0]?.recent_7d || 0);
+            }
+            systemInstruction =
+                'Anda adalah Konsultan Bisnis Pengrajin Keramik DinoyoCraft Malang. Berikan tepat 2 kalimat tips harian yang praktis, spesifik, dan hangat (maksimal 250 karakter, Bahasa Indonesia, tanpa tanda kutip pembuka/penutup, tanpa markdown/bullet) berdasarkan data nyata toko pengrajin hari ini.';
+            promptContext = `Tanggal: ${dateKey}. Nama toko: ${storeName}. Produk aktif di katalog: ${prodCount}. Produk unggulan: ${topProductName || 'belum ada produk'}. Stok menipis: ${lowStockName || 'aman'}. Pesanan perlu dikemas/dikirim sekarang: ${pendingOrders}. Pesanan 7 hari terakhir: ${totalOrders7d}. Rating toko: ${Number(mitra?.rating || 0).toFixed(1)} (${Number(mitra?.total_reviews || 0)} ulasan). Berikan tips bisnis spesifik hari ini.`;
+        }
+        try {
+            const result = await (0, aiProviderService_js_1.generateAiCompletion)({
+                apiKey: settings.apiKey,
+                provider: settings.provider,
+                model: settings.modelName,
+                systemPrompt: systemInstruction,
+                history: [],
+                userMessage: promptContext,
+                temperature: 0.55,
+                maxTokens: 220,
+            });
+            const cleaned = (0, aiProviderService_js_1.cleanAiChatOutput)(result.text)
+                .replace(/^["'“”]+|["'“”]+$/g, '')
+                .replace(/\s+/g, ' ')
+                .trim();
+            if (cleaned) {
+                dailyInsightCache.set(cacheKey, {
+                    insight: cleaned,
+                    providerLabel: settings.providerLabel,
+                    modelName: result.model || settings.modelName,
+                    dateKey,
+                    cachedAt: Date.now(),
+                });
+                (0, response_js_1.sendSuccess)(res, {
+                    configured: true,
+                    active: Boolean(settings.isAutoReplyActive),
+                    provider_label: settings.providerLabel,
+                    model_name: result.model || settings.modelName,
+                    date: dateKey,
+                    insight: cleaned,
+                    cached: false,
+                }, 'Analisis AI harian berhasil dibuat.');
+                return;
+            }
+        }
+        catch (aiErr) {
+            console.warn('⚠️ [getDailyDashboardInsight] Provider AI gagal:', aiErr?.message || aiErr);
+        }
+        (0, response_js_1.sendSuccess)(res, {
+            configured: false,
+            error_state: true,
+            provider_label: settings.providerLabel,
+            model_name: settings.modelName,
+            date: dateKey,
+            insight: null,
+            status_message: 'Layanan AI belum dapat memuat analisis harian saat ini (periksa validitas atau kuota API Key di menu Pengaturan AI).',
+        }, 'Analisis AI belum tersedia.');
+    }
+    catch (err) {
+        console.error('❌ [getDailyDashboardInsight] Error:', err);
+        (0, response_js_1.sendError)(res, 'Gagal memuat analisis AI harian.', 500, err?.message);
+    }
+};
+exports.getDailyDashboardInsight = getDailyDashboardInsight;
 //# sourceMappingURL=aiController.js.map

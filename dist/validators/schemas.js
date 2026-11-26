@@ -247,7 +247,7 @@ exports.aiChatSchema = zod_1.z.object({
         .max(12)
         .optional(),
     locale: zod_1.z.enum(['id', 'en']).optional(),
-    role_context: zod_1.z.enum(['customer', 'mitra', 'store_bot']).optional(),
+    role_context: zod_1.z.enum(['customer', 'mitra', 'store_bot', 'claybot']).optional(),
     store_name: zod_1.z.string().max(150).optional().nullable(),
     store_user_id: zod_1.z.union([zod_1.z.string(), zod_1.z.number()]).optional().nullable(),
     target_user_id: zod_1.z.union([zod_1.z.string(), zod_1.z.number()]).optional().nullable(),

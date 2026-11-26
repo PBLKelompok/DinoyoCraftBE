@@ -52,6 +52,12 @@ router.post('/chat', authMiddleware_js_1.optionalVerifyToken, (0, validatorMiddl
 // Semua route analisis bisnis di bawah memerlukan autentikasi
 router.use(authMiddleware_js_1.verifyToken);
 /**
+ * @route   GET /api/ai/daily-insight
+ * @desc    Tips & Analisis AI Harian berbasis data nyata untuk dashboard Mitra & Admin
+ * @access  Protected (mitra & admin)
+ */
+router.get('/daily-insight', (0, authMiddleware_js_1.requireRole)(['mitra', 'admin']), aiController.getDailyDashboardInsight);
+/**
  * @route   POST /api/ai/analyze
  * @desc    Menjalankan analisis AI untuk konteks bisnis keramik
  * @access  Protected (mitra & admin)

@@ -417,11 +417,14 @@ const updateProduct = async (req, res) => {
         const uploadedFile = req.file;
         const uploadedFileUrl = (0, uploadMiddleware_js_1.getUploadedFileUrl)(uploadedFile);
         const rawImageUrl = typeof req.body?.image_url === 'string' ? String(req.body.image_url).trim() : '';
+        const existingImages = (0, productController_js_1.parseImageUrls)(existingProduct.image_urls);
         const updatedImageUrlsJson = uploadedFileUrl
             ? JSON.stringify([uploadedFileUrl])
             : rawImageUrl && (rawImageUrl.startsWith('http://') || rawImageUrl.startsWith('https://'))
                 ? JSON.stringify([rawImageUrl])
-                : existingProduct.image_urls;
+                : existingImages.length > 0
+                    ? JSON.stringify(existingImages)
+                    : null;
         // Lakukan update ke database
         await database_js_1.default.query(`UPDATE products 
        SET name = ?, description = ?, price = ?, stock = ?, weight_gram = ?, variants = ?, category_id = ?, image_urls = ?, updated_at = NOW() 
@@ -433,6 +436,7 @@ const updateProduct = async (req, res) => {
             message: 'Produk berhasil diperbarui!',
             data: {
                 ...saved,
+                image_urls: (0, productController_js_1.parseImageUrls)(saved.image_urls),
                 variants: (0, productController_js_1.parseVariants)(saved.variants),
             }
         });
@@ -508,8 +512,19 @@ const getPublicMitraStores = async (req, res) => {
 exports.getPublicMitraStores = getPublicMitraStores;
 const getPublicMitraDetail = async (req, res) => {
     try {
-        const { id } = req.params;
-        const [stores] = await database_js_1.default.query(`SELECT 
+        const rawParam = String(req.params.id || '').trim();
+        const toSlug = (val) => val
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, '-')
+            .replace(/^-+|-+$/g, '');
+        let resolvedId = /^\d+$/.test(rawParam) ? Number(rawParam) : null;
+        if (!resolvedId) {
+            const tailMatch = /-(\d+)$/.exec(rawParam);
+            if (tailMatch) {
+                resolvedId = Number(tailMatch[1]);
+            }
+        }
+        const baseStoreSelect = `SELECT 
         m.id,
         m.user_id,
         m.store_name,
@@ -535,13 +550,25 @@ const getPublicMitraDetail = async (req, res) => {
         COALESCE((SELECT ROUND(AVG(r.rating), 1) FROM reviews r JOIN products p ON r.product_id = p.id WHERE p.mitra_id = m.id), 0) AS avg_rating,
         COALESCE((SELECT COUNT(*) FROM reviews r JOIN products p ON r.product_id = p.id WHERE p.mitra_id = m.id), 0) AS total_reviews
       FROM mitra_profiles m
-      LEFT JOIN users u ON m.user_id = u.id
-      WHERE m.id = ? AND m.is_active = 1 AND m.is_verified = 1
-      LIMIT 1`, [id]);
+      LEFT JOIN users u ON m.user_id = u.id`;
+        let stores = [];
+        if (resolvedId && resolvedId > 0) {
+            const [byId] = await database_js_1.default.query(`${baseStoreSelect} WHERE m.id = ? AND m.is_active = 1 AND m.is_verified = 1 LIMIT 1`, [resolvedId]);
+            stores = byId || [];
+        }
+        if ((!stores || stores.length === 0) && rawParam) {
+            const targetSlug = toSlug(rawParam.replace(/-\d+$/, '')) || toSlug(rawParam);
+            const [allActive] = await database_js_1.default.query(`${baseStoreSelect} WHERE m.is_active = 1 AND m.is_verified = 1`);
+            const matched = (allActive || []).find((s) => toSlug(String(s.store_name || '')) === targetSlug);
+            if (matched) {
+                stores = [matched];
+            }
+        }
         if (!stores || stores.length === 0) {
             res.status(404).json({ success: false, message: 'Toko mitra tidak ditemukan' });
             return;
         }
+        const id = stores[0].id;
         const totalStoreReviews = Number(stores[0].total_reviews) || 0;
         const store = {
             ...stores[0],

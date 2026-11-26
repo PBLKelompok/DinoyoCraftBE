@@ -34,4 +34,8 @@ export type OtpEmailPurpose = 'register' | 'reset_password' | 'login' | '2fa_ena
  * Kirim kode OTP ke email asli user dengan desain minimalis monokrom DinoyoCraft
  */
 export declare const sendOTPEmail: (toEmail: string, otpCode: string, recipientName?: string, purpose?: OtpEmailPurpose) => Promise<void>;
+/**
+ * Kirim email pemberitahuan resmi bahwa pengajuan penghapusan akun telah disetujui oleh Admin
+ */
+export declare const sendAccountDeletionApprovedEmail: (toEmail: string, recipientName?: string) => Promise<void>;
 //# sourceMappingURL=emailService.d.ts.map

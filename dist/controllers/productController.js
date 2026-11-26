@@ -410,8 +410,19 @@ const getPublicProducts = async (req, res) => {
 exports.getPublicProducts = getPublicProducts;
 const getPublicProductDetail = async (req, res) => {
     try {
-        const { id } = req.params;
-        const query = `
+        const rawParam = String(req.params.id || '').trim();
+        const toSlug = (val) => val
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, '-')
+            .replace(/^-+|-+$/g, '');
+        let candidateId = /^\d+$/.test(rawParam) ? Number(rawParam) : null;
+        if (!candidateId) {
+            const tailMatch = /-(\d+)$/.exec(rawParam);
+            if (tailMatch) {
+                candidateId = Number(tailMatch[1]);
+            }
+        }
+        const baseSelect = `
       SELECT 
         p.id,
         p.mitra_id,
@@ -450,25 +461,37 @@ const getPublicProductDetail = async (req, res) => {
       FROM products p
       LEFT JOIN mitra_profiles m ON p.mitra_id = m.id
       LEFT JOIN categories c ON p.category_id = c.id
-      WHERE p.id = ? AND (p.is_deleted = 0 OR p.is_deleted IS NULL) AND m.is_active = 1 AND m.is_verified = 1
-      LIMIT 1
     `;
-        const [rows] = await database_js_1.default.query(query, [id]);
+        let rows = [];
+        if (candidateId && candidateId > 0) {
+            const [byId] = await database_js_1.default.query(`${baseSelect} WHERE p.id = ? AND (p.is_deleted = 0 OR p.is_deleted IS NULL) AND m.is_active = 1 LIMIT 1`, [candidateId]);
+            rows = byId || [];
+        }
+        if ((!rows || rows.length === 0) && rawParam) {
+            const targetSlug = toSlug(rawParam.replace(/-\d+$/, '')) || toSlug(rawParam);
+            const searchLike = `%${targetSlug.split('-').slice(0, 3).join('%')}%`;
+            const [candidates] = await database_js_1.default.query(`${baseSelect} WHERE (p.is_deleted = 0 OR p.is_deleted IS NULL) AND m.is_active = 1 AND LOWER(p.name) LIKE ? LIMIT 50`, [searchLike]);
+            const matched = (candidates || []).find((p) => toSlug(String(p.name || '')) === targetSlug);
+            if (matched) {
+                rows = [matched];
+            }
+        }
         if (!rows || rows.length === 0) {
             res.status(404).json({ success: false, message: 'Produk tidak ditemukan' });
             return;
         }
         const row = rows[0];
+        const id = row.id;
         const imageUrls = (0, exports.parseImageUrls)(row.image_urls);
         const mainImage = imageUrls.length > 0 ? imageUrls[0] : '';
         // Ambil ulasan nyata produk dari database
         const [reviewRows] = await database_js_1.default.query(`SELECT r.id, r.rating, r.variant, r.comment, r.photo_urls, r.helpful_count,
-              r.seller_reply, r.replied_at, r.created_at, u.name AS user_name
+              r.seller_reply, r.replied_at, r.created_at, u.name AS user_name, u.avatar_url AS user_avatar
        FROM reviews r
        LEFT JOIN users u ON r.user_id = u.id
        WHERE r.product_id = ?
        ORDER BY r.id DESC
-       LIMIT 10`, [id]);
+       LIMIT 50`, [id]);
         const formattedReviews = (reviewRows || []).map((rev) => ({
             id: rev.id,
             rating: Number(rev.rating) || 5,
@@ -480,6 +503,7 @@ const getPublicProductDetail = async (req, res) => {
             replied_at: rev.replied_at || null,
             created_at: rev.created_at,
             user_name: rev.user_name || 'Pembeli',
+            user_avatar: rev.user_avatar || null,
         }));
         const totalReviews = Number(row.total_reviews) || formattedReviews.length;
         const rating = totalReviews > 0

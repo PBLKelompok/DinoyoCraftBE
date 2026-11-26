@@ -22,6 +22,17 @@ router.post('/chat', optionalVerifyToken, validateZod(aiChatSchema), aiControlle
 router.use(verifyToken);
 
 /**
+ * @route   GET /api/ai/daily-insight
+ * @desc    Tips & Analisis AI Harian berbasis data nyata untuk dashboard Mitra & Admin
+ * @access  Protected (mitra & admin)
+ */
+router.get(
+  '/daily-insight',
+  requireRole(['mitra', 'admin']),
+  aiController.getDailyDashboardInsight
+);
+
+/**
  * @route   POST /api/ai/analyze
  * @desc    Menjalankan analisis AI untuk konteks bisnis keramik
  * @access  Protected (mitra & admin)

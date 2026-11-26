@@ -11,6 +11,9 @@ exports.cancelMyAccountDeletion = exports.submitAccountDeletion = exports.getMyA
 const bcryptjs_1 = __importDefault(require("bcryptjs"));
 const database_js_1 = __importDefault(require("../config/database.js"));
 const authMiddleware_js_1 = require("../middlewares/authMiddleware.js");
+const pusher_js_1 = require("../utils/pusher.js");
+const notificationService_js_1 = require("../services/notificationService.js");
+const emailService_js_1 = require("../utils/emailService.js");
 let tablesInitialized = false;
 let initTablesPromise = null;
 /**
@@ -33,12 +36,16 @@ const ensureModerationTables = async () => {
           \`target_name\` varchar(255) NOT NULL,
           \`reason\` text NOT NULL,
           \`status\` varchar(50) NOT NULL DEFAULT 'pending',
+          \`action_taken\` varchar(50) DEFAULT NULL,
           \`resolved_at\` datetime DEFAULT NULL,
           \`created_at\` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
           \`updated_at\` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
           PRIMARY KEY (\`id\`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
       `);
+            await database_js_1.default
+                .query('ALTER TABLE `reports` ADD COLUMN `action_taken` varchar(50) DEFAULT NULL')
+                .catch(() => { });
             await database_js_1.default.query(`
         CREATE TABLE IF NOT EXISTS \`account_deletions\` (
           \`id\` int UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -122,25 +129,37 @@ const getReports = async (req, res) => {
         const [countRows] = await database_js_1.default.query(`SELECT COUNT(*) as total FROM reports ${whereClause}`, params);
         const total = Number(countRows[0]?.total || 0);
         // Ambil data laporan terpaginasi
-        const [reports] = await database_js_1.default.query(`SELECT id, reporter_id, reporter_name, type, target_id, target_name, reason, status, resolved_at, created_at, updated_at
+        const [reports] = await database_js_1.default.query(`SELECT id, reporter_id, reporter_name, type, target_id, target_name, reason, status, action_taken, resolved_at, created_at, updated_at
        FROM reports
        ${whereClause}
        ORDER BY created_at DESC
        LIMIT ? OFFSET ?`, [...params, limitNum, offset]);
         // Format agar cocok dengan antarmuka Next.js dan Flutter
-        const formattedReports = reports.map((r) => ({
-            id: String(r.id),
-            type: (r.type || 'toko').toLowerCase(),
-            target: r.target_name,
-            target_id: r.target_id,
-            reporter: r.reporter_name,
-            reporter_name: r.reporter_name,
-            reason: r.reason,
-            status: (r.status === 'Selesai' || r.status === 'resolved') ? 'resolved' : 'pending',
-            date: formatDate(r.created_at),
-            created_at: r.created_at,
-            resolved_at: r.resolved_at
-        }));
+        const formattedReports = reports.map((r) => {
+            const normalizedType = (r.type || 'toko').toLowerCase();
+            const isResolved = r.status === 'Selesai' || r.status === 'resolved';
+            const inferredAction = r.action_taken
+                ? String(r.action_taken).toLowerCase()
+                : isResolved
+                    ? normalizedType === 'ulasan'
+                        ? 'hapus'
+                        : 'suspend'
+                    : null;
+            return {
+                id: String(r.id),
+                type: normalizedType,
+                target: r.target_name,
+                target_id: r.target_id,
+                reporter: r.reporter_name,
+                reporter_name: r.reporter_name,
+                reason: r.reason,
+                status: isResolved ? 'resolved' : 'pending',
+                action_taken: inferredAction,
+                date: formatDate(r.created_at),
+                created_at: r.created_at,
+                resolved_at: r.resolved_at,
+            };
+        });
         res.status(200).json({
             success: true,
             data: formattedReports,
@@ -218,8 +237,13 @@ const handleReportAction = async (req, res) => {
             }
         }
         // Jika 'abaikan' / 'ignore', tidak ada entitas yang diubah, hanya status laporan yang diperbarui
-        // Ubah status laporan menjadi selesai / resolved
-        await database_js_1.default.query("UPDATE reports SET status = 'resolved', resolved_at = NOW() WHERE id = ?", [id]);
+        // Ubah status laporan menjadi selesai / resolved beserta tindakan yang diambil
+        const normalizedAction = actionType === 'abaikan' || actionType === 'ignore'
+            ? 'abaikan'
+            : actionType === 'hapus' || actionType === 'delete' || actionType === 'takedown'
+                ? 'hapus'
+                : 'suspend';
+        await database_js_1.default.query("UPDATE reports SET status = 'resolved', action_taken = ?, resolved_at = NOW() WHERE id = ?", [normalizedAction, id]);
         res.status(200).json({
             success: true,
             message: `Tindakan ${action} berhasil diterapkan.`
@@ -309,15 +333,61 @@ const handleDeletionAction = async (req, res) => {
             return;
         }
         const delReq = rows[0];
-        // Jika disetujui, nonaktifkan akun pengguna & cabut seluruh sesi token aktif
+        // Jika disetujui, kirim notifikasi & sinyal force-logout realtime, email konfirmasi, lalu nonaktifkan akun
         if (action === 'approved') {
-            if (delReq.user_id) {
-                await database_js_1.default.query('UPDATE users SET is_active = 0, token_version = token_version + 1 WHERE id = ?', [delReq.user_id]);
-                (0, authMiddleware_js_1.invalidateUserAuthCache)(Number(delReq.user_id));
+            let targetUserId = delReq.user_id ? Number(delReq.user_id) : null;
+            let targetEmail = delReq.email ? String(delReq.email).trim() : '';
+            let targetName = delReq.name ? String(delReq.name).trim() : 'Pelanggan';
+            if (!targetUserId && targetEmail) {
+                const [uLookup] = await database_js_1.default.query('SELECT id, name, email FROM users WHERE LOWER(TRIM(email)) = LOWER(TRIM(?)) LIMIT 1', [targetEmail]);
+                if (uLookup && uLookup.length > 0) {
+                    targetUserId = Number(uLookup[0].id);
+                    targetName = uLookup[0].name || targetName;
+                    targetEmail = uLookup[0].email || targetEmail;
+                }
             }
-            else if (delReq.email) {
-                await database_js_1.default.query('UPDATE users SET is_active = 0, token_version = token_version + 1 WHERE email = ?', [delReq.email]);
+            else if (targetUserId) {
+                const [uLookup] = await database_js_1.default.query('SELECT id, name, email FROM users WHERE id = ? LIMIT 1', [targetUserId]);
+                if (uLookup && uLookup.length > 0) {
+                    targetName = uLookup[0].name || targetName;
+                    targetEmail = uLookup[0].email || targetEmail;
+                }
+            }
+            const notifTitle = 'Penghapusan Akun Disetujui';
+            const notifBody = 'Pengajuan penghapusan akun DinoyoCraft Anda telah disetujui oleh Admin. Akun Anda kini telah dinonaktifkan.';
+            if (targetUserId && targetUserId > 0) {
+                // 1. Kirim push notification FCM ke perangkat aktif sebelum token perangkat dihapus
+                await (0, notificationService_js_1.sendPushNotificationToUser)(targetUserId, notifTitle, notifBody, {
+                    type: 'account_deleted',
+                    category: 'account',
+                    force_logout: 'true',
+                    route: '/login',
+                }).catch(() => { });
+                // 2. Pancarkan event Pusher realtime agar aplikasi mobile langsung auto-logout seketika
+                await pusher_js_1.pusher
+                    .trigger(`user-${targetUserId}`, 'account-deleted', {
+                    user_id: targetUserId,
+                    force_logout: true,
+                    title: notifTitle,
+                    message: notifBody,
+                })
+                    .catch(() => { });
+                // 3. Nonaktifkan user & naikkan token_version agar seluruh JWT/refresh token langsung gugur
+                await database_js_1.default.query('UPDATE users SET is_active = 0, token_version = token_version + 1 WHERE id = ?', [targetUserId]);
+                await database_js_1.default
+                    .query('DELETE FROM user_device_tokens WHERE user_id = ?', [targetUserId])
+                    .catch(() => { });
+                (0, authMiddleware_js_1.invalidateUserAuthCache)(targetUserId);
+            }
+            else if (targetEmail) {
+                await database_js_1.default.query('UPDATE users SET is_active = 0, token_version = token_version + 1 WHERE LOWER(TRIM(email)) = LOWER(TRIM(?))', [targetEmail]);
                 (0, authMiddleware_js_1.invalidateUserAuthCache)();
+            }
+            // 4. Kirim email pemberitahuan penghapusan akun disetujui
+            if (targetEmail && (0, emailService_js_1.isEmailConfigured)()) {
+                (0, emailService_js_1.sendAccountDeletionApprovedEmail)(targetEmail, targetName).catch((err) => {
+                    console.warn('⚠️ [handleDeletionAction] Gagal mengirim email persetujuan hapus akun:', err?.message || err);
+                });
             }
         }
         // Update status pengajuan
