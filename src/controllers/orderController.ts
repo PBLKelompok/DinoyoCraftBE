@@ -20,6 +20,7 @@ import {
   toIsoWibString,
   toMysqlWibDatetime,
 } from '../services/paymentGatewayService.js';
+import { getOrderProductSummary } from '../utils/orderProductLabel.js';
 
 // ============================================================
 // HELPER — format kode pesanan Mitra (`ORD-YYYYMMDD-00<id>`)
@@ -222,6 +223,7 @@ export const checkout = async (req: Request, res: Response): Promise<void> => {
     await recordOrderStatusHistory(orderId, 'pending', null, 'Pesanan dibuat, menunggu pembayaran', connection);
 
     // 8. Kirim Notifikasi Sistem ke Mitra & Pelanggan
+    const createdProductLabel = await getOrderProductSummary(orderId, connection);
     await connection.query(
       `INSERT INTO notifications (user_id, title, message, type, reference_id)
        VALUES (?, ?, ?, 'order', ?)`,
@@ -239,7 +241,7 @@ export const checkout = async (req: Request, res: Response): Promise<void> => {
       [
         userId,
         'Pesanan Berhasil Dibuat',
-        `Pesanan #${orderId} di toko ${mitras[0].store_name} berhasil dibuat. Silakan selesaikan pembayaran.`,
+        `Pesanan "${createdProductLabel}" di toko ${mitras[0].store_name} berhasil dibuat. Silakan selesaikan pembayaran.`,
         orderId,
       ]
     );
@@ -713,7 +715,8 @@ export const updateOrderStatus = async (req: Request, res: Response): Promise<vo
       [status, nextTracking, nextShippingMethod, id]
     );
 
-    // Kirim notifikasi status terbaru ke customer
+    // Kirim notifikasi status terbaru ke customer (menggunakan nama produk, bukan ID pesanan)
+    const productLabel = await getOrderProductSummary(Number(id), connection);
     const finalResi = nextTracking || order.tracking_number || '-';
     const statusTitles: Record<string, string> = {
       paid: 'Pembayaran Berhasil',
@@ -723,16 +726,16 @@ export const updateOrderStatus = async (req: Request, res: Response): Promise<vo
       cancelled: 'Pesanan Dibatalkan',
     };
     const statusMessages: Record<string, string> = {
-      paid: `Pembayaran pesanan #${id} telah berhasil dikonfirmasi. Penjual akan segera memproses barang Anda.`,
-      packed: `Pesanan #${id} sedang dikemas dengan rapi oleh pengrajin.`,
+      paid: `Pembayaran untuk "${productLabel}" telah berhasil dikonfirmasi. Penjual akan segera memproses barang Anda.`,
+      packed: `Pesanan "${productLabel}" sedang dikemas dengan rapi oleh pengrajin.`,
       shipped:
         finalResi !== '-'
-          ? `Pesanan #${id} telah dikirim! No. Resi: ${finalResi}`
-          : `Pesanan #${id} telah dikirim oleh pengrajin!`,
-      completed: `Pesanan #${id} telah diterima dan selesai. Dana telah diteruskan ke penjual. Jangan lupa beri ulasan terbaik!`,
-      cancelled: `Pesanan #${id} telah dibatalkan.`,
+          ? `Pesanan "${productLabel}" telah dikirim! No. Resi: ${finalResi}`
+          : `Pesanan "${productLabel}" telah dikirim oleh pengrajin!`,
+      completed: `Pesanan "${productLabel}" telah diterima dan selesai. Jangan lupa beri ulasan terbaik!`,
+      cancelled: `Pesanan "${productLabel}" telah dibatalkan.`,
     };
-    const notifTitle = statusTitles[status] || `Status Pesanan #${id}: ${status.toUpperCase()}`;
+    const notifTitle = statusTitles[status] || 'Pembaruan Status Pesanan';
 
     if (statusMessages[status]) {
       await connection.query(
@@ -790,6 +793,7 @@ export const updateOrderStatus = async (req: Request, res: Response): Promise<vo
       await pusher.trigger(`user-${order.user_id}`, 'order-status-changed', {
         order_id: Number(id),
         status,
+        product_name: productLabel,
         title: notifTitle,
         message: statusMessages[status] || '',
         tracking_number: nextTracking || order.tracking_number || null,
@@ -818,7 +822,13 @@ export const updateOrderStatus = async (req: Request, res: Response): Promise<vo
         order.user_id,
         notifTitle,
         statusMessages[status],
-        { type: 'order', route: customerOrderRoute, order_id: String(id), status }
+        {
+          type: 'order',
+          route: customerOrderRoute,
+          order_id: String(id),
+          status,
+          product_name: productLabel,
+        }
       );
     }
     if (status === 'completed') {

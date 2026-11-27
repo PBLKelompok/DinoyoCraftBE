@@ -48,6 +48,35 @@ const notificationService_js_1 = require("../services/notificationService.js");
 const uploadMiddleware_js_1 = require("../middlewares/uploadMiddleware.js");
 const authMiddleware_js_1 = require("../middlewares/authMiddleware.js");
 let knownDevicesTableReady = false;
+let customerAccountColumnReady = false;
+const ensureCustomerAccountColumn = async () => {
+    if (customerAccountColumnReady)
+        return;
+    try {
+        await database_1.default.query('ALTER TABLE users ADD COLUMN has_customer_account TINYINT(1) NOT NULL DEFAULT 0');
+    }
+    catch (err) {
+        const msg = String(err?.message || '');
+        if (err?.code !== 'ER_DUP_FIELDNAME' && !/duplicate column/i.test(msg)) {
+            console.warn('⚠️ [ensureCustomerAccountColumn] Non-fatal:', msg);
+        }
+    }
+    try {
+        await database_1.default.query("UPDATE users SET has_customer_account = 1 WHERE role = 'pengunjung' AND has_customer_account = 0");
+    }
+    catch { }
+    customerAccountColumnReady = true;
+};
+void ensureCustomerAccountColumn();
+const hasMobileCustomerAccess = (user) => {
+    if (!user)
+        return false;
+    if (user.role === 'pengunjung')
+        return true;
+    if (user.role === 'mitra' && Number(user.has_customer_account) === 1)
+        return true;
+    return false;
+};
 const ensureKnownDevicesTable = async () => {
     if (knownDevicesTableReady)
         return;
@@ -133,19 +162,9 @@ const handlePostLoginDeviceSecurity = async (req, user, authMethodLabel) => {
        FROM user_known_devices
        WHERE user_id = ?
        ORDER BY last_login_at DESC`, [userId]);
-        let isDifferentDeviceLogin = false;
-        if (Array.isArray(existingDevices) && existingDevices.length > 0) {
-            const latestDevice = existingDevices[0];
-            const knownBefore = existingDevices.some((d) => String(d.device_fingerprint) === fingerprint);
-            isDifferentDeviceLogin =
-                !knownBefore || String(latestDevice.device_fingerprint) !== fingerprint;
-        }
-        else {
-            const [tokenRows] = await database_1.default.query('SELECT COUNT(*) AS cnt FROM user_device_tokens WHERE user_id = ?', [userId]);
-            if (Number(tokenRows?.[0]?.cnt || 0) > 0) {
-                isDifferentDeviceLogin = true;
-            }
-        }
+        const knownBefore = Array.isArray(existingDevices) &&
+            existingDevices.some((d) => String(d.device_fingerprint) === fingerprint);
+        const isDifferentDeviceLogin = Array.isArray(existingDevices) && existingDevices.length > 0 && !knownBefore;
         await database_1.default.query(`INSERT INTO user_known_devices (user_id, device_fingerprint, device_name, ip_address, last_login_at)
        VALUES (?, ?, ?, ?, NOW())
        ON DUPLICATE KEY UPDATE
@@ -240,6 +259,7 @@ const applyMitraPendingAuthLog = (res, opts) => {
 };
 const registerCustomer = async (req, res) => {
     try {
+        await ensureCustomerAccountColumn();
         const { name, email, password, phone, username, birth_date, birthDate, google_id, avatar_url, isGoogleAuth } = req.body;
         const isGoogle = Boolean(isGoogleAuth || google_id);
         const normalizedBirthDate = (birth_date ?? birthDate)
@@ -257,7 +277,7 @@ const registerCustomer = async (req, res) => {
         const cleanEmail = email.trim().toLowerCase();
         const cleanUsername = username ? String(username).trim().toLowerCase() : null;
         if (cleanUsername) {
-            const [existingUsernames] = await database_1.default.query('SELECT id FROM users WHERE username = ?', [cleanUsername]);
+            const [existingUsernames] = await database_1.default.query('SELECT id FROM users WHERE username = ? AND LOWER(TRIM(email)) != ?', [cleanUsername, cleanEmail]);
             if (existingUsernames && existingUsernames.length > 0) {
                 res.status(409).json({
                     success: false,
@@ -268,43 +288,109 @@ const registerCustomer = async (req, res) => {
             }
         }
         // 1. Cek apakah email sudah terdaftar di database
-        const [existingUsers] = await database_1.default.query('SELECT id, name, username, phone, birth_date, gender, email, role, google_id, avatar_url, token_version, two_factor_enabled FROM users WHERE email = ?', [cleanEmail]);
+        const [existingUsers] = await database_1.default.query('SELECT id, name, username, phone, birth_date, gender, email, role, has_customer_account, google_id, avatar_url, token_version, two_factor_enabled FROM users WHERE LOWER(TRIM(email)) = ?', [cleanEmail]);
         if (existingUsers && existingUsers.length > 0) {
             const existing = existingUsers[0];
-            if (isGoogle && !existing.google_id) {
-                // Tautkan akun Google ke pengguna yang sudah terdaftar
-                await database_1.default.query('UPDATE users SET google_id = ?, avatar_url = COALESCE(avatar_url, ?), phone = COALESCE(phone, ?), birth_date = COALESCE(birth_date, ?) WHERE id = ?', [google_id || null, avatar_url || null, normalizedPhone, normalizedBirthDate, existing.id]);
-                const { token, refresh_token } = signTokenPair({ id: existing.id, email: cleanEmail, role: existing.role, ver: existing.token_version });
-                res.status(200).json({
-                    success: true,
-                    message: 'Akun Google berhasil dihubungkan!',
-                    data: {
-                        token,
-                        refresh_token,
-                        id: existing.id,
-                        name: existing.name,
-                        username: existing.username || cleanEmail.split('@')[0],
-                        phone: existing.phone || normalizedPhone,
-                        birth_date: existing.birth_date || normalizedBirthDate,
-                        email: cleanEmail,
-                        role: existing.role,
-                        two_factor_enabled: Boolean(existing.two_factor_enabled),
-                    },
+            if (existing.role === 'admin') {
+                res.status(403).json({
+                    success: false,
+                    message: 'Email administrator tidak dapat didaftarkan sebagai akun Customer.',
                     meta: { timestamp: new Date().toISOString() }
                 });
                 return;
             }
-            res.status(409).json({
-                success: false,
-                message: 'Email sudah terdaftar. Silakan langsung masuk ke akun Anda.',
-                meta: { timestamp: new Date().toISOString() }
-            });
-            return;
+            const alreadyCustomer = hasMobileCustomerAccess(existing);
+            if (!alreadyCustomer && existing.role === 'mitra') {
+                if (isGoogle) {
+                    await database_1.default.query(`UPDATE users
+             SET username = COALESCE(?, username),
+                 phone = COALESCE(?, phone),
+                 birth_date = COALESCE(?, birth_date),
+                 google_id = COALESCE(google_id, ?),
+                 avatar_url = COALESCE(avatar_url, ?),
+                 has_customer_account = 1
+             WHERE id = ?`, [
+                        cleanUsername,
+                        normalizedPhone,
+                        normalizedBirthDate,
+                        google_id || null,
+                        avatar_url || null,
+                        existing.id,
+                    ]);
+                    void ensureKnownDevicesTable()
+                        .then(() => {
+                        const { fingerprint, deviceName, ipAddress } = extractClientDeviceInfo(req);
+                        return database_1.default.query(`INSERT INTO user_known_devices (user_id, device_fingerprint, device_name, ip_address, last_login_at)
+                 VALUES (?, ?, ?, ?, NOW())
+                 ON DUPLICATE KEY UPDATE device_name = VALUES(device_name), ip_address = VALUES(ip_address), last_login_at = NOW()`, [existing.id, fingerprint, deviceName, ipAddress]);
+                    })
+                        .catch(() => { });
+                    const { token, refresh_token } = signTokenPair({
+                        id: existing.id,
+                        email: cleanEmail,
+                        role: 'pengunjung',
+                        ver: existing.token_version,
+                    });
+                    res.status(201).json({
+                        success: true,
+                        message: 'Pendaftaran akun Customer berhasil!',
+                        data: {
+                            token,
+                            refresh_token,
+                            id: existing.id,
+                            name: existing.name || name.trim(),
+                            username: cleanUsername || existing.username || cleanEmail.split('@')[0],
+                            phone: normalizedPhone || existing.phone,
+                            birth_date: normalizedBirthDate || existing.birth_date,
+                            email: cleanEmail,
+                            role: 'pengunjung',
+                            avatar_url: existing.avatar_url || avatar_url || null,
+                            two_factor_enabled: Boolean(existing.two_factor_enabled),
+                        },
+                        meta: { timestamp: new Date().toISOString() },
+                    });
+                    return;
+                }
+                // Jika pendaftaran manual (!isGoogle) untuk akun Mitra yang belum punya akses Customer:
+                // lanjutkan ke pengiriman OTP di bawah agar verifikasi OTP mengaktifkan has_customer_account = 1.
+            }
+            else {
+                if (isGoogle && !existing.google_id) {
+                    // Tautkan akun Google ke pengguna Customer yang sudah terdaftar
+                    await database_1.default.query('UPDATE users SET google_id = ?, avatar_url = COALESCE(avatar_url, ?), phone = COALESCE(phone, ?), birth_date = COALESCE(birth_date, ?), has_customer_account = 1 WHERE id = ?', [google_id || null, avatar_url || null, normalizedPhone, normalizedBirthDate, existing.id]);
+                    const { token, refresh_token } = signTokenPair({ id: existing.id, email: cleanEmail, role: 'pengunjung', ver: existing.token_version });
+                    res.status(200).json({
+                        success: true,
+                        message: 'Akun Google berhasil dihubungkan!',
+                        data: {
+                            token,
+                            refresh_token,
+                            id: existing.id,
+                            name: existing.name,
+                            username: existing.username || cleanEmail.split('@')[0],
+                            phone: existing.phone || normalizedPhone,
+                            birth_date: existing.birth_date || normalizedBirthDate,
+                            email: cleanEmail,
+                            role: 'pengunjung',
+                            avatar_url: existing.avatar_url || avatar_url || null,
+                            two_factor_enabled: Boolean(existing.two_factor_enabled),
+                        },
+                        meta: { timestamp: new Date().toISOString() }
+                    });
+                    return;
+                }
+                res.status(409).json({
+                    success: false,
+                    message: 'Email sudah terdaftar. Silakan langsung masuk ke akun Anda.',
+                    meta: { timestamp: new Date().toISOString() }
+                });
+                return;
+            }
         }
         // 2. Jika pendaftaran lewat Google: langsung aktifkan tanpa OTP
         if (isGoogle) {
             const passwordHash = password ? await bcryptjs_1.default.hash(password, 10) : null;
-            const [result] = await database_1.default.query('INSERT INTO users (name, username, phone, birth_date, email, password_hash, password_changed_at, role, is_active, google_id, avatar_url) VALUES (?, ?, ?, ?, ?, ?, ?, "pengunjung", 1, ?, ?)', [
+            const [result] = await database_1.default.query('INSERT INTO users (name, username, phone, birth_date, email, password_hash, password_changed_at, role, has_customer_account, is_active, google_id, avatar_url) VALUES (?, ?, ?, ?, ?, ?, ?, "pengunjung", 1, 1, ?, ?)', [
                 name.trim(),
                 cleanUsername,
                 normalizedPhone,
@@ -316,6 +402,14 @@ const registerCustomer = async (req, res) => {
                 avatar_url || null,
             ]);
             const newUserId = result.insertId;
+            void ensureKnownDevicesTable()
+                .then(() => {
+                const { fingerprint, deviceName, ipAddress } = extractClientDeviceInfo(req);
+                return database_1.default.query(`INSERT INTO user_known_devices (user_id, device_fingerprint, device_name, ip_address, last_login_at)
+             VALUES (?, ?, ?, ?, NOW())
+             ON DUPLICATE KEY UPDATE device_name = VALUES(device_name), ip_address = VALUES(ip_address), last_login_at = NOW()`, [newUserId, fingerprint, deviceName, ipAddress]);
+            })
+                .catch(() => { });
             const { token, refresh_token } = signTokenPair({ id: newUserId, email: cleanEmail, role: 'pengunjung' });
             res.status(201).json({
                 success: true,
@@ -458,8 +552,9 @@ const registerMitra = async (req, res) => {
             res.status(400).json({ success: false, message: 'File KTP, NIB, dan Foto Produk wajib diunggah' });
             return;
         }
+        await ensureCustomerAccountColumn();
         const cleanRegisterEmail = String(email).trim().toLowerCase();
-        const [existingUsers] = await connection.query('SELECT id, role, password_hash FROM users WHERE LOWER(TRIM(email)) = ? LIMIT 1', [cleanRegisterEmail]);
+        const [existingUsers] = await connection.query('SELECT id, role, has_customer_account, password_hash FROM users WHERE LOWER(TRIM(email)) = ? LIMIT 1', [cleanRegisterEmail]);
         let newUserId;
         if (existingUsers.length > 0) {
             const existingUser = existingUsers[0];
@@ -477,6 +572,7 @@ const registerMitra = async (req, res) => {
                 res.status(409).json({ success: false, message: 'Email sudah terdaftar sebagai Mitra' });
                 return;
             }
+            const preserveCustomer = existingUser.role === 'pengunjung' || Number(existingUser.has_customer_account) === 1 ? 1 : 0;
             if (existingUser.password_hash) {
                 const passMatches = typeof password === 'string' &&
                     password.length > 0 &&
@@ -490,16 +586,16 @@ const registerMitra = async (req, res) => {
                     return;
                 }
                 newUserId = existingUser.id;
-                await connection.query("UPDATE users SET name = ?, role = 'mitra' WHERE id = ?", [name.trim(), newUserId]);
+                await connection.query("UPDATE users SET name = ?, role = 'mitra', has_customer_account = ? WHERE id = ?", [name.trim(), preserveCustomer, newUserId]);
             }
             else {
                 newUserId = existingUser.id;
                 if (password) {
                     const passwordHash = await bcryptjs_1.default.hash(password, 10);
-                    await connection.query("UPDATE users SET name = ?, password_hash = ?, role = 'mitra' WHERE id = ?", [name.trim(), passwordHash, newUserId]);
+                    await connection.query("UPDATE users SET name = ?, password_hash = ?, role = 'mitra', has_customer_account = ? WHERE id = ?", [name.trim(), passwordHash, preserveCustomer, newUserId]);
                 }
                 else {
-                    await connection.query("UPDATE users SET name = ?, role = 'mitra' WHERE id = ?", [name.trim(), newUserId]);
+                    await connection.query("UPDATE users SET name = ?, role = 'mitra', has_customer_account = ? WHERE id = ?", [name.trim(), preserveCustomer, newUserId]);
                 }
             }
         }
@@ -580,6 +676,7 @@ exports.registerMitra = registerMitra;
 // Login umum yang mendukung peran pengunjung, mitra, dan admin
 const login = async (req, res) => {
     try {
+        await ensureCustomerAccountColumn();
         const { email, password, portal } = req.body;
         if (!email || !password) {
             res.status(400).json({
@@ -592,7 +689,7 @@ const login = async (req, res) => {
         const query = `
       SELECT u.id, u.name, COALESCE(NULLIF(TRIM(u.username), ''), SUBSTRING_INDEX(u.email, '@', 1)) AS username,
              u.phone, u.birth_date, u.gender, u.email, u.password_hash, u.password_changed_at,
-             u.role, u.is_active, u.avatar_url, u.token_version, u.two_factor_enabled,
+             u.role, u.has_customer_account, u.is_active, u.avatar_url, u.token_version, u.two_factor_enabled,
              m.store_name, m.is_verified, m.rejection_reason
       FROM users u 
       LEFT JOIN mitra_profiles m ON u.id = m.user_id 
@@ -623,6 +720,22 @@ const login = async (req, res) => {
                 code: 'PENGUNJUNG_ROLE_NOT_ALLOWED_WEB',
                 redirect_to_register: true,
                 message: 'Email ini sudah terdaftar sebagai Pengunjung di aplikasi DinoyoCraft dan tidak dapat digunakan untuk masuk di web. Silakan daftar sebagai Mitra terlebih dahulu jika ingin menggunakan akun yang sama.',
+                data: {
+                    email: user.email,
+                    name: user.name,
+                    role: user.role,
+                },
+                meta: { timestamp: new Date().toISOString() }
+            });
+            return;
+        }
+        if (portal === 'mobile' && !hasMobileCustomerAccess(user)) {
+            res.status(403).json({
+                success: false,
+                is_registered: false,
+                redirect_to_register: true,
+                code: 'NON_CUSTOMER_ROLE_NOT_ALLOWED_MOBILE',
+                message: 'Email ini belum terdaftar sebagai akun Customer di aplikasi DinoyoCraft. Silakan daftar terlebih dahulu.',
                 data: {
                     email: user.email,
                     name: user.name,
@@ -685,9 +798,10 @@ const login = async (req, res) => {
             });
             return;
         }
-        const { token, refresh_token } = signTokenPair({ id: user.id, email: user.email, role: user.role, ver: user.token_version });
-        void handlePostLoginDeviceSecurity(req, user, 'Email & Kata Sandi');
-        if (user.role === 'mitra' && Number(user.is_verified) !== 1) {
+        const effectiveRole = portal === 'mobile' ? 'pengunjung' : user.role;
+        const { token, refresh_token } = signTokenPair({ id: user.id, email: user.email, role: effectiveRole, ver: user.token_version });
+        void handlePostLoginDeviceSecurity(req, { ...user, role: effectiveRole }, 'Email & Kata Sandi');
+        if (effectiveRole === 'mitra' && Number(user.is_verified) !== 1) {
             applyMitraPendingAuthLog(res, {
                 userId: user.id,
                 email: user.email,
@@ -703,10 +817,10 @@ const login = async (req, res) => {
             res.locals['logEventName'] = 'auth.login.succeeded';
             res.locals['logSeverity'] = 'success';
             res.locals['logOutcome'] = 'success';
-            res.locals['logMessage'] = `Login berhasil untuk akun ${user.role} (${user.email})`;
+            res.locals['logMessage'] = `Login berhasil untuk akun ${effectiveRole} (${user.email})`;
             res.locals['logMetadata'] = {
                 email: user.email,
-                role: user.role,
+                role: effectiveRole,
                 storeName: user.store_name || null,
                 authMethod: 'password',
             };
@@ -730,14 +844,14 @@ const login = async (req, res) => {
                 birth_date: user.birth_date,
                 gender: user.gender,
                 email: user.email,
-                role: user.role,
+                role: effectiveRole,
                 avatar_url: user.avatar_url,
                 two_factor_enabled: false,
                 password_changed_at: user.password_changed_at,
                 has_password: true,
-                store_name: user.store_name,
-                is_verified: user.is_verified,
-                rejection_reason: user.rejection_reason
+                store_name: portal === 'mobile' ? undefined : user.store_name,
+                is_verified: portal === 'mobile' ? undefined : user.is_verified,
+                rejection_reason: portal === 'mobile' ? undefined : user.rejection_reason
             },
             meta: {
                 timestamp: new Date().toISOString()
@@ -986,9 +1100,12 @@ const googleLogin = async (req, res) => {
             res.status(400).json({ success: false, message: 'Gagal mendapatkan data akun dari Google' });
             return;
         }
+        await ensureCustomerAccountColumn();
+        const isMobilePortal = portal === 'mobile' || (!portal && role === 'pengunjung');
         const query = `
       SELECT u.id, u.name, COALESCE(NULLIF(TRIM(u.username), ''), SUBSTRING_INDEX(u.email, '@', 1)) AS username,
-             u.phone, u.birth_date, u.gender, u.email, u.role, u.is_active, u.google_id,
+             u.phone, u.birth_date, u.gender, u.email, u.role, u.has_customer_account, u.is_active, u.google_id,
+             u.avatar_url AS user_avatar_url,
              COALESCE(NULLIF(m.avatar_url, ''), u.avatar_url) AS avatar_url,
              u.token_version, u.two_factor_enabled, u.password_changed_at,
              (u.password_hash IS NOT NULL AND u.password_hash != '') AS has_password,
@@ -1016,6 +1133,23 @@ const googleLogin = async (req, res) => {
                         email: user.email,
                         name: user.name,
                         role: user.role,
+                    },
+                    meta: { timestamp: new Date().toISOString() },
+                });
+                return;
+            }
+            if (isMobilePortal && !hasMobileCustomerAccess(user)) {
+                res.status(404).json({
+                    success: false,
+                    is_registered: false,
+                    redirect_to_register: true,
+                    code: 'NON_CUSTOMER_ROLE_NOT_ALLOWED_MOBILE',
+                    message: 'Akun Google ini belum terdaftar sebagai Customer di aplikasi DinoyoCraft. Silakan daftar terlebih dahulu.',
+                    data: {
+                        email: user.email,
+                        name: name || user.name,
+                        avatar_url: avatarUrl || user.user_avatar_url || null,
+                        google_id: googleId || user.google_id || null,
                     },
                     meta: { timestamp: new Date().toISOString() },
                 });
@@ -1092,7 +1226,7 @@ const googleLogin = async (req, res) => {
                 await connection.beginTransaction();
                 const targetRole = (role === 'pengunjung') ? 'pengunjung' : 'mitra';
                 const cleanPhone = phone && String(phone).trim() ? String(phone).trim() : null;
-                const [insertUser] = await connection.query('INSERT INTO users (name, phone, email, password_hash, role, is_active, google_id, avatar_url) VALUES (?, ?, ?, NULL, ?, 1, ?, ?)', [name, cleanPhone, email.trim().toLowerCase(), targetRole, googleId || null, avatarUrl || null]);
+                const [insertUser] = await connection.query('INSERT INTO users (name, phone, email, password_hash, role, has_customer_account, is_active, google_id, avatar_url) VALUES (?, ?, ?, NULL, ?, ?, 1, ?, ?)', [name, cleanPhone, email.trim().toLowerCase(), targetRole, targetRole === 'pengunjung' ? 1 : 0, googleId || null, avatarUrl || null]);
                 const newUserId = insertUser.insertId;
                 if (targetRole === 'mitra') {
                     await connection.query(`INSERT INTO mitra_profiles 
@@ -1131,9 +1265,13 @@ const googleLogin = async (req, res) => {
                 connection.release();
             }
         }
-        const { token, refresh_token } = signTokenPair({ id: user.id, email: user.email, role: user.role, ver: user.token_version });
+        const effectiveGoogleRole = isMobilePortal ? 'pengunjung' : user.role;
+        const effectiveGoogleAvatar = isMobilePortal
+            ? (user.user_avatar_url || avatarUrl || null)
+            : (user.avatar_url || avatarUrl);
+        const { token, refresh_token } = signTokenPair({ id: user.id, email: user.email, role: effectiveGoogleRole, ver: user.token_version });
         if (users.length > 0) {
-            void handlePostLoginDeviceSecurity(req, user, 'Google Sign-In');
+            void handlePostLoginDeviceSecurity(req, { ...user, role: effectiveGoogleRole }, 'Google Sign-In');
         }
         else {
             void ensureKnownDevicesTable().then(() => {
@@ -1144,8 +1282,8 @@ const googleLogin = async (req, res) => {
             }).catch(() => { });
         }
         res.locals['userId'] = user.id;
-        res.locals['role'] = user.role;
-        if (user.role === 'mitra' && Number(user.is_verified) !== 1) {
+        res.locals['role'] = effectiveGoogleRole;
+        if (effectiveGoogleRole === 'mitra' && Number(user.is_verified) !== 1) {
             applyMitraPendingAuthLog(res, {
                 userId: user.id,
                 email: user.email,
@@ -1163,7 +1301,7 @@ const googleLogin = async (req, res) => {
                 users.length > 0 ? 'auth.google_login.succeeded' : 'auth.google_register.succeeded';
             res.locals['logSeverity'] = 'success';
             res.locals['logOutcome'] = 'success';
-            res.locals['logMessage'] = `${users.length > 0 ? 'Login' : 'Pendaftaran'} Google berhasil untuk akun ${user.role} (${user.email})`;
+            res.locals['logMessage'] = `${users.length > 0 ? 'Login' : 'Pendaftaran'} Google berhasil untuk akun ${effectiveGoogleRole} (${user.email})`;
         }
         res.cookie('token', token, {
             httpOnly: true,
@@ -1186,13 +1324,13 @@ const googleLogin = async (req, res) => {
                 birth_date: user.birth_date || null,
                 gender: user.gender || null,
                 email: user.email,
-                role: user.role,
+                role: effectiveGoogleRole,
                 two_factor_enabled: Boolean(user.two_factor_enabled),
                 has_password: Boolean(user.has_password),
-                store_name: user.store_name,
-                is_verified: user.is_verified,
-                rejection_reason: user.rejection_reason,
-                avatar_url: user.avatar_url || avatarUrl
+                store_name: isMobilePortal ? undefined : user.store_name,
+                is_verified: isMobilePortal ? undefined : user.is_verified,
+                rejection_reason: isMobilePortal ? undefined : user.rejection_reason,
+                avatar_url: effectiveGoogleAvatar
             },
             meta: { timestamp: new Date().toISOString() }
         });
@@ -1208,9 +1346,11 @@ exports.googleLogin = googleLogin;
 const getProfile = async (_req, res) => {
     try {
         const userId = res.locals['userId'];
+        const callerRole = res.locals['role'];
         if (!userId)
             return res.status(401).json({ success: false, message: 'Unauthorized' });
         const [rows] = await database_1.default.query(`SELECT u.id, u.name, u.email, u.role,
+              u.avatar_url AS user_avatar_url,
               COALESCE(NULLIF(m.avatar_url, ''), u.avatar_url) AS avatar_url,
               u.phone, u.birth_date, u.gender,
               u.two_factor_enabled, u.password_changed_at, u.google_id,
@@ -1227,10 +1367,13 @@ const getProfile = async (_req, res) => {
             return res.status(404).json({ success: false, message: 'User tidak ditemukan' });
         }
         const profile = rows[0];
+        const isCustomerSession = callerRole === 'pengunjung';
         return res.status(200).json({
             success: true,
             data: {
                 ...profile,
+                role: isCustomerSession ? 'pengunjung' : profile.role,
+                avatar_url: isCustomerSession ? (profile.user_avatar_url || null) : profile.avatar_url,
                 two_factor_enabled: Boolean(profile.two_factor_enabled),
                 has_password: Boolean(profile.has_password),
             },
@@ -1297,7 +1440,7 @@ const updateProfile = async (req, res) => {
         const userRole = roleRows?.[0]?.role;
         // Perilaku mitra: profil toko ikut diperbarui. Customer (pengunjung)
         // maupun admin TIDAK boleh membuat baris mitra_profiles palsu.
-        if (userRole === 'pengunjung' || userRole === 'admin') {
+        if (userRole === 'pengunjung' || userRole === 'admin' || res.locals['role'] === 'pengunjung') {
             const [rows2] = await database_1.default.query(`SELECT u.id, u.name,
                 COALESCE(NULLIF(TRIM(u.username), ''), SUBSTRING_INDEX(u.email, '@', 1)) AS username,
                 u.email, u.role, u.avatar_url,
@@ -1312,6 +1455,7 @@ const updateProfile = async (req, res) => {
                 data: p
                     ? {
                         ...p,
+                        role: res.locals['role'] === 'pengunjung' ? 'pengunjung' : p.role,
                         two_factor_enabled: Boolean(p.two_factor_enabled),
                         has_password: Boolean(p.has_password),
                     }
@@ -1713,21 +1857,53 @@ const verifyRegisterOtp = async (req, res) => {
             res.status(400).json({ success: false, message: 'Data pendaftaran tidak lengkap. Ulangi pendaftaran.' });
             return;
         }
-        const [existing] = await database_1.default.query('SELECT id FROM users WHERE email = ?', [cleanEmail]);
-        if (existing && existing.length > 0) {
-            otpStore.delete(cleanEmail);
-            res.status(409).json({ success: false, message: 'Email sudah terdaftar. Silakan langsung login.' });
-            return;
-        }
+        await ensureCustomerAccountColumn();
         const passwordHash = await bcryptjs_1.default.hash(regPass, 10);
         const regUsername = (req.body.username || regData.username || '').trim().toLowerCase() || null;
         const cleanRegPhone = regPhone && String(regPhone).trim() ? String(regPhone).trim() : null;
         const rawBirth = req.body.birth_date ?? req.body.birthDate ?? regData.birth_date ?? null;
         const cleanBirthDate = rawBirth ? String(rawBirth).slice(0, 10) : null;
-        const [result] = await database_1.default.query('INSERT INTO users (name, username, phone, birth_date, email, password_hash, password_changed_at, role, is_active) VALUES (?, ?, ?, ?, ?, ?, NOW(), "pengunjung", 1)', [regName, regUsername, cleanRegPhone, cleanBirthDate, cleanEmail, passwordHash]);
-        const newUserId = result.insertId;
+        const [existing] = await database_1.default.query('SELECT id, role, has_customer_account, avatar_url, token_version, two_factor_enabled FROM users WHERE LOWER(TRIM(email)) = ? LIMIT 1', [cleanEmail]);
+        let newUserId;
+        let tokenVer = 0;
+        let existingAvatarUrl = null;
+        let existingTwoFactor = false;
+        if (existing && existing.length > 0) {
+            const ex = existing[0];
+            if (ex.role === 'mitra' && !hasMobileCustomerAccess(ex)) {
+                await database_1.default.query(`UPDATE users
+           SET username = COALESCE(?, username),
+               phone = COALESCE(?, phone),
+               birth_date = COALESCE(?, birth_date),
+               password_hash = ?,
+               password_changed_at = NOW(),
+               has_customer_account = 1
+           WHERE id = ?`, [regUsername, cleanRegPhone, cleanBirthDate, passwordHash, ex.id]);
+                newUserId = Number(ex.id);
+                tokenVer = Number(ex.token_version ?? 0);
+                existingAvatarUrl = ex.avatar_url || null;
+                existingTwoFactor = Boolean(ex.two_factor_enabled);
+            }
+            else {
+                otpStore.delete(cleanEmail);
+                res.status(409).json({ success: false, message: 'Email sudah terdaftar. Silakan langsung login.' });
+                return;
+            }
+        }
+        else {
+            const [result] = await database_1.default.query('INSERT INTO users (name, username, phone, birth_date, email, password_hash, password_changed_at, role, has_customer_account, is_active) VALUES (?, ?, ?, ?, ?, ?, NOW(), "pengunjung", 1, 1)', [regName, regUsername, cleanRegPhone, cleanBirthDate, cleanEmail, passwordHash]);
+            newUserId = result.insertId;
+        }
+        void ensureKnownDevicesTable()
+            .then(() => {
+            const { fingerprint, deviceName, ipAddress } = extractClientDeviceInfo(req);
+            return database_1.default.query(`INSERT INTO user_known_devices (user_id, device_fingerprint, device_name, ip_address, last_login_at)
+           VALUES (?, ?, ?, ?, NOW())
+           ON DUPLICATE KEY UPDATE device_name = VALUES(device_name), ip_address = VALUES(ip_address), last_login_at = NOW()`, [newUserId, fingerprint, deviceName, ipAddress]);
+        })
+            .catch(() => { });
         otpStore.delete(cleanEmail);
-        const { token, refresh_token } = signTokenPair({ id: newUserId, email: cleanEmail, role: 'pengunjung' });
+        const { token, refresh_token } = signTokenPair({ id: newUserId, email: cleanEmail, role: 'pengunjung', ver: tokenVer });
         res.status(201).json({
             success: true,
             message: 'Pendaftaran pengunjung berhasil terverifikasi!',
@@ -1741,7 +1917,8 @@ const verifyRegisterOtp = async (req, res) => {
                 birth_date: cleanBirthDate,
                 email: cleanEmail,
                 role: 'pengunjung',
-                two_factor_enabled: false,
+                avatar_url: existingAvatarUrl,
+                two_factor_enabled: existingTwoFactor,
                 has_password: true,
             },
             meta: { timestamp: new Date().toISOString() }
@@ -1843,7 +2020,10 @@ const checkUsername = async (req, res) => {
             });
             return;
         }
-        const [rows] = await database_1.default.query('SELECT id FROM users WHERE username = ? LIMIT 1', [username]);
+        const rawEmail = (req.query['email'] || req.body?.['email'] || '').toString().trim().toLowerCase();
+        const [rows] = rawEmail
+            ? await database_1.default.query('SELECT id FROM users WHERE username = ? AND LOWER(TRIM(email)) != ? LIMIT 1', [username, rawEmail])
+            : await database_1.default.query('SELECT id FROM users WHERE username = ? LIMIT 1', [username]);
         const isAvailable = !rows || rows.length === 0;
         res.status(200).json({
             success: true,
@@ -1906,7 +2086,8 @@ const refreshToken = async (req, res) => {
             res.status(401).json({ success: false, message: 'Sesi Anda telah diakhiri dari perangkat lain. Silakan login ulang.' });
             return;
         }
-        const { token, refresh_token: newRefreshToken } = signTokenPair({ id: user.id, email: user.email, role: user.role, ver: user.token_version });
+        const effectiveRefreshRole = decoded.role === 'pengunjung' ? 'pengunjung' : user.role;
+        const { token, refresh_token: newRefreshToken } = signTokenPair({ id: user.id, email: user.email, role: effectiveRefreshRole, ver: user.token_version });
         res.status(200).json({
             success: true,
             message: 'Token berhasil diperbarui.',
@@ -1915,7 +2096,7 @@ const refreshToken = async (req, res) => {
                 refresh_token: newRefreshToken,
                 id: user.id,
                 email: user.email,
-                role: user.role,
+                role: effectiveRefreshRole,
             },
             meta: { timestamp: new Date().toISOString() }
         });
@@ -1933,7 +2114,8 @@ exports.refreshToken = refreshToken;
 // ============================================================
 const verifyLoginOtp = async (req, res) => {
     try {
-        const { email, otp } = req.body;
+        await ensureCustomerAccountColumn();
+        const { email, otp, portal } = req.body;
         if (!email || !otp) {
             res.status(400).json({ success: false, message: 'Email dan kode OTP wajib diisi.' });
             return;
@@ -1941,7 +2123,7 @@ const verifyLoginOtp = async (req, res) => {
         const cleanEmail = String(email).trim().toLowerCase();
         const cleanOtp = String(otp).trim();
         const [users] = await database_1.default.query(`SELECT u.id, u.name, COALESCE(NULLIF(TRIM(u.username), ''), SUBSTRING_INDEX(u.email, '@', 1)) AS username,
-              u.phone, u.birth_date, u.gender, u.email, u.role, u.is_active, u.avatar_url,
+              u.phone, u.birth_date, u.gender, u.email, u.role, u.has_customer_account, u.is_active, u.avatar_url,
               u.token_version, u.two_factor_enabled, u.password_changed_at,
               (u.password_hash IS NOT NULL AND u.password_hash != '') AS has_password,
               m.store_name, m.is_verified, m.rejection_reason
@@ -1955,6 +2137,17 @@ const verifyLoginOtp = async (req, res) => {
         const user = users[0];
         if (user.is_active === 0) {
             res.status(403).json({ success: false, message: 'Akun Anda sedang dinonaktifkan.' });
+            return;
+        }
+        if (portal === 'mobile' && !hasMobileCustomerAccess(user)) {
+            res.status(403).json({
+                success: false,
+                is_registered: false,
+                redirect_to_register: true,
+                code: 'NON_CUSTOMER_ROLE_NOT_ALLOWED_MOBILE',
+                message: 'Email ini belum terdaftar sebagai akun Customer di aplikasi DinoyoCraft. Silakan daftar terlebih dahulu.',
+                data: { email: user.email, name: user.name, role: user.role },
+            });
             return;
         }
         const [otpRows] = await database_1.default.query(`SELECT id, otp_code, expires_at
@@ -1985,16 +2178,17 @@ const verifyLoginOtp = async (req, res) => {
             return;
         }
         await database_1.default.query('UPDATE user_otps SET is_used = 1 WHERE id = ?', [otpRow.id]);
+        const effectiveOtpRole = portal === 'mobile' ? 'pengunjung' : user.role;
         const { token, refresh_token } = signTokenPair({
             id: user.id,
             email: user.email,
-            role: user.role,
+            role: effectiveOtpRole,
             ver: user.token_version,
         });
-        void handlePostLoginDeviceSecurity(req, user, 'Verifikasi 2 Langkah (2FA OTP)');
+        void handlePostLoginDeviceSecurity(req, { ...user, role: effectiveOtpRole }, 'Verifikasi 2 Langkah (2FA OTP)');
         res.locals['userId'] = user.id;
-        res.locals['role'] = user.role;
-        if (user.role === 'mitra' && Number(user.is_verified) !== 1) {
+        res.locals['role'] = effectiveOtpRole;
+        if (effectiveOtpRole === 'mitra' && Number(user.is_verified) !== 1) {
             applyMitraPendingAuthLog(res, {
                 userId: user.id,
                 email: user.email,
@@ -2010,7 +2204,7 @@ const verifyLoginOtp = async (req, res) => {
             res.locals['logEventName'] = 'auth.login.succeeded';
             res.locals['logSeverity'] = 'success';
             res.locals['logOutcome'] = 'success';
-            res.locals['logMessage'] = `Verifikasi OTP 2FA & login berhasil untuk akun ${user.role} (${user.email})`;
+            res.locals['logMessage'] = `Verifikasi OTP 2FA & login berhasil untuk akun ${effectiveOtpRole} (${user.email})`;
         }
         res.cookie('token', token, {
             httpOnly: true,
@@ -2031,14 +2225,14 @@ const verifyLoginOtp = async (req, res) => {
                 birth_date: user.birth_date,
                 gender: user.gender,
                 email: user.email,
-                role: user.role,
+                role: effectiveOtpRole,
                 avatar_url: user.avatar_url,
                 two_factor_enabled: Boolean(user.two_factor_enabled),
                 password_changed_at: user.password_changed_at,
                 has_password: Boolean(user.has_password),
-                store_name: user.store_name,
-                is_verified: user.is_verified,
-                rejection_reason: user.rejection_reason,
+                store_name: portal === 'mobile' ? undefined : user.store_name,
+                is_verified: portal === 'mobile' ? undefined : user.is_verified,
+                rejection_reason: portal === 'mobile' ? undefined : user.rejection_reason,
             },
             meta: { timestamp: new Date().toISOString() },
         });
@@ -2309,10 +2503,11 @@ const logoutOtherDevices = async (req, res) => {
             return;
         }
         const user = users[0];
+        const effectiveLogoutOtherRole = res.locals['role'] === 'pengunjung' ? 'pengunjung' : user.role;
         const { token, refresh_token } = signTokenPair({
             id: user.id,
             email: user.email,
-            role: user.role,
+            role: effectiveLogoutOtherRole,
             ver: user.token_version,
         });
         res.status(200).json({

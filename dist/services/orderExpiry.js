@@ -15,6 +15,7 @@ const database_js_1 = __importDefault(require("../config/database.js"));
 const notificationService_js_1 = require("./notificationService.js");
 const pusher_js_1 = __importDefault(require("../utils/pusher.js"));
 const productController_js_1 = require("../controllers/productController.js");
+const orderProductLabel_js_1 = require("../utils/orderProductLabel.js");
 /**
  * Tandai transaksi pending sebagai gagal/expired/dibatalkan secara idempoten:
  * stok dikembalikan, order diubah ke 'cancelled', timeline & notifikasi dicatat.
@@ -52,6 +53,7 @@ async function cancelOrExpireOrderPayment(trx, reasonStatus, raw) {
         ]);
         await connection.query("INSERT INTO order_status_history (order_id, status, note) VALUES (?, 'cancelled', ?)", [trx.order_id, historyNote[reasonStatus]]);
         const nominal = Number(trx.total_amount || 0).toLocaleString('id-ID');
+        const productLabel = await (0, orderProductLabel_js_1.getOrderProductSummary)(trx.order_id, connection);
         const buyerTitle = reasonStatus === 'expired'
             ? 'Pesanan Kedaluwarsa'
             : reasonStatus === 'cancelled'
@@ -61,7 +63,7 @@ async function cancelOrExpireOrderPayment(trx, reasonStatus, raw) {
        VALUES (?, ?, ?, 'order', ?)`, [
             trx.user_id,
             buyerTitle,
-            `Pesanan #${trx.order_id} (Rp ${nominal}) dibatalkan otomatis. ${historyNote[reasonStatus]}. Silakan buat pesanan baru bila masih berminat.`,
+            `Pesanan "${productLabel}" (Rp ${nominal}) dibatalkan otomatis. ${historyNote[reasonStatus]}. Silakan buat pesanan baru bila masih berminat.`,
             trx.order_id,
         ]);
         await connection.query(`INSERT INTO notifications (user_id, title, message, type, reference_id)
@@ -77,6 +79,7 @@ async function cancelOrExpireOrderPayment(trx, reasonStatus, raw) {
                 order_id: trx.order_id,
                 status: 'cancelled',
                 payment_status: reasonStatus,
+                product_name: productLabel,
             });
             await pusher_js_1.default.trigger(`user-${trx.mitra_user_id}`, 'order-status-changed', {
                 order_id: trx.order_id,
@@ -87,7 +90,13 @@ async function cancelOrExpireOrderPayment(trx, reasonStatus, raw) {
         catch {
             // Non-blocking
         }
-        void (0, notificationService_js_1.sendPushNotificationToUser)(trx.user_id, buyerTitle, `Pesanan #${trx.order_id} dibatalkan otomatis. Silakan buat pesanan baru bila masih berminat.`, { type: 'order', route: '/profile', order_id: String(trx.order_id), status: 'cancelled' });
+        void (0, notificationService_js_1.sendPushNotificationToUser)(trx.user_id, buyerTitle, `Pesanan "${productLabel}" dibatalkan otomatis. Silakan buat pesanan baru bila masih berminat.`, {
+            type: 'order',
+            route: `/profile?tab=${encodeURIComponent('Belum Bayar')}&trackOrderId=${trx.order_id}`,
+            order_id: String(trx.order_id),
+            status: 'cancelled',
+            product_name: productLabel,
+        });
         return true;
     }
     catch (err) {

@@ -17,6 +17,7 @@ const notificationService_js_1 = require("../services/notificationService.js");
 const productController_js_1 = require("./productController.js");
 const midtransService_js_1 = require("../services/midtransService.js");
 const paymentGatewayService_js_1 = require("../services/paymentGatewayService.js");
+const orderProductLabel_js_1 = require("../utils/orderProductLabel.js");
 // ============================================================
 // HELPER — format kode pesanan Mitra (`ORD-YYYYMMDD-00<id>`)
 // ============================================================
@@ -144,6 +145,7 @@ const checkout = async (req, res) => {
         // 7b. Catat status awal untuk timeline tracking
         await recordOrderStatusHistory(orderId, 'pending', null, 'Pesanan dibuat, menunggu pembayaran', connection);
         // 8. Kirim Notifikasi Sistem ke Mitra & Pelanggan
+        const createdProductLabel = await (0, orderProductLabel_js_1.getOrderProductSummary)(orderId, connection);
         await connection.query(`INSERT INTO notifications (user_id, title, message, type, reference_id)
        VALUES (?, ?, ?, 'order', ?)`, [
             mitras[0].user_id,
@@ -155,7 +157,7 @@ const checkout = async (req, res) => {
        VALUES (?, ?, ?, 'order', ?)`, [
             userId,
             'Pesanan Berhasil Dibuat',
-            `Pesanan #${orderId} di toko ${mitras[0].store_name} berhasil dibuat. Silakan selesaikan pembayaran.`,
+            `Pesanan "${createdProductLabel}" di toko ${mitras[0].store_name} berhasil dibuat. Silakan selesaikan pembayaran.`,
             orderId,
         ]);
         await connection.commit();
@@ -568,7 +570,8 @@ const updateOrderStatus = async (req, res) => {
          tracking_number = COALESCE(?, tracking_number),
          shipping_method = COALESCE(?, shipping_method)
        WHERE id = ?`, [status, nextTracking, nextShippingMethod, id]);
-        // Kirim notifikasi status terbaru ke customer
+        // Kirim notifikasi status terbaru ke customer (menggunakan nama produk, bukan ID pesanan)
+        const productLabel = await (0, orderProductLabel_js_1.getOrderProductSummary)(Number(id), connection);
         const finalResi = nextTracking || order.tracking_number || '-';
         const statusTitles = {
             paid: 'Pembayaran Berhasil',
@@ -578,15 +581,15 @@ const updateOrderStatus = async (req, res) => {
             cancelled: 'Pesanan Dibatalkan',
         };
         const statusMessages = {
-            paid: `Pembayaran pesanan #${id} telah berhasil dikonfirmasi. Penjual akan segera memproses barang Anda.`,
-            packed: `Pesanan #${id} sedang dikemas dengan rapi oleh pengrajin.`,
+            paid: `Pembayaran untuk "${productLabel}" telah berhasil dikonfirmasi. Penjual akan segera memproses barang Anda.`,
+            packed: `Pesanan "${productLabel}" sedang dikemas dengan rapi oleh pengrajin.`,
             shipped: finalResi !== '-'
-                ? `Pesanan #${id} telah dikirim! No. Resi: ${finalResi}`
-                : `Pesanan #${id} telah dikirim oleh pengrajin!`,
-            completed: `Pesanan #${id} telah diterima dan selesai. Dana telah diteruskan ke penjual. Jangan lupa beri ulasan terbaik!`,
-            cancelled: `Pesanan #${id} telah dibatalkan.`,
+                ? `Pesanan "${productLabel}" telah dikirim! No. Resi: ${finalResi}`
+                : `Pesanan "${productLabel}" telah dikirim oleh pengrajin!`,
+            completed: `Pesanan "${productLabel}" telah diterima dan selesai. Jangan lupa beri ulasan terbaik!`,
+            cancelled: `Pesanan "${productLabel}" telah dibatalkan.`,
         };
-        const notifTitle = statusTitles[status] || `Status Pesanan #${id}: ${status.toUpperCase()}`;
+        const notifTitle = statusTitles[status] || 'Pembaruan Status Pesanan';
         if (statusMessages[status]) {
             await connection.query(`INSERT INTO notifications (user_id, title, message, type, reference_id)
          VALUES (?, ?, ?, 'order', ?)`, [order.user_id, notifTitle, statusMessages[status], id]);
@@ -626,6 +629,7 @@ const updateOrderStatus = async (req, res) => {
             await pusher_js_1.default.trigger(`user-${order.user_id}`, 'order-status-changed', {
                 order_id: Number(id),
                 status,
+                product_name: productLabel,
                 title: notifTitle,
                 message: statusMessages[status] || '',
                 tracking_number: nextTracking || order.tracking_number || null,
@@ -649,7 +653,13 @@ const updateOrderStatus = async (req, res) => {
                         ? 'Diterima'
                         : 'Belum Bayar';
             const customerOrderRoute = `/profile?tab=${encodeURIComponent(targetTab)}&trackOrderId=${id}`;
-            void (0, notificationService_js_1.sendPushNotificationToUser)(order.user_id, notifTitle, statusMessages[status], { type: 'order', route: customerOrderRoute, order_id: String(id), status });
+            void (0, notificationService_js_1.sendPushNotificationToUser)(order.user_id, notifTitle, statusMessages[status], {
+                type: 'order',
+                route: customerOrderRoute,
+                order_id: String(id),
+                status,
+                product_name: productLabel,
+            });
         }
         if (status === 'completed') {
             void (0, notificationService_js_1.sendPushNotificationToUser)(order.mitra_user_id, 'Dana Masuk ke Saldo Aktif!', `Pesanan #${id} selesai diterima pembeli. Rp ${mitraNominal} masuk ke Saldo Aktif.`, { type: 'order', route: '/mitra/dashboard/laporan-keuangan', order_id: String(id), status });

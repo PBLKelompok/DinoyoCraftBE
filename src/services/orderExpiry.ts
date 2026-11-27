@@ -9,6 +9,7 @@ import pool from '../config/database.js';
 import { sendPushNotificationToUser } from './notificationService.js';
 import pusher from '../utils/pusher.js';
 import { adjustProductStockAndVariant } from '../controllers/productController.js';
+import { getOrderProductSummary } from '../utils/orderProductLabel.js';
 
 export type OrderFailureReason = 'expired' | 'failed' | 'cancelled';
 
@@ -90,6 +91,7 @@ export async function cancelOrExpireOrderPayment(
     );
 
     const nominal = Number(trx.total_amount || 0).toLocaleString('id-ID');
+    const productLabel = await getOrderProductSummary(trx.order_id, connection);
     const buyerTitle =
       reasonStatus === 'expired'
         ? 'Pesanan Kedaluwarsa'
@@ -103,7 +105,7 @@ export async function cancelOrExpireOrderPayment(
       [
         trx.user_id,
         buyerTitle,
-        `Pesanan #${trx.order_id} (Rp ${nominal}) dibatalkan otomatis. ${historyNote[reasonStatus]}. Silakan buat pesanan baru bila masih berminat.`,
+        `Pesanan "${productLabel}" (Rp ${nominal}) dibatalkan otomatis. ${historyNote[reasonStatus]}. Silakan buat pesanan baru bila masih berminat.`,
         trx.order_id,
       ]
     );
@@ -126,6 +128,7 @@ export async function cancelOrExpireOrderPayment(
         order_id: trx.order_id,
         status: 'cancelled',
         payment_status: reasonStatus,
+        product_name: productLabel,
       });
       await pusher.trigger(`user-${trx.mitra_user_id}`, 'order-status-changed', {
         order_id: trx.order_id,
@@ -139,8 +142,14 @@ export async function cancelOrExpireOrderPayment(
     void sendPushNotificationToUser(
       trx.user_id,
       buyerTitle,
-      `Pesanan #${trx.order_id} dibatalkan otomatis. Silakan buat pesanan baru bila masih berminat.`,
-      { type: 'order', route: '/profile', order_id: String(trx.order_id), status: 'cancelled' }
+      `Pesanan "${productLabel}" dibatalkan otomatis. Silakan buat pesanan baru bila masih berminat.`,
+      {
+        type: 'order',
+        route: `/profile?tab=${encodeURIComponent('Belum Bayar')}&trackOrderId=${trx.order_id}`,
+        order_id: String(trx.order_id),
+        status: 'cancelled',
+        product_name: productLabel,
+      }
     );
 
     return true;

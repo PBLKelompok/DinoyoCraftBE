@@ -13,6 +13,7 @@ exports.findTransactionByRef = findTransactionByRef;
 const database_js_1 = __importDefault(require("../config/database.js"));
 const notificationService_js_1 = require("./notificationService.js");
 const pusher_js_1 = __importDefault(require("../utils/pusher.js"));
+const orderProductLabel_js_1 = require("../utils/orderProductLabel.js");
 /**
  * Tandai transaksi + pesanan sebagai 'paid'/'success', kirim notifikasi ke
  * mitra & pembeli, dan trigger Pusher. Idempoten: jika transaksi sudah
@@ -43,6 +44,8 @@ async function settleOrderPaid(trx) {
             await connection.query('INSERT INTO order_status_history (order_id, status, note) VALUES (?, ?, ?)', [trx.order_id, 'paid', 'Pembayaran terverifikasi']);
         }
         const nominal = Number(trx.total_amount || 0).toLocaleString('id-ID');
+        const productLabel = await (0, orderProductLabel_js_1.getOrderProductSummary)(trx.order_id, connection);
+        const buyerPaidMsg = `Pembayaran untuk "${productLabel}" telah berhasil dikonfirmasi. Penjual akan segera memproses barang Anda.`;
         await connection.query(`INSERT INTO notifications (user_id, title, message, type, reference_id)
        VALUES (?, ?, ?, 'order', ?)`, [
             trx.mitra_user_id,
@@ -54,7 +57,7 @@ async function settleOrderPaid(trx) {
        VALUES (?, ?, ?, 'order', ?)`, [
             trx.user_id,
             'Pembayaran Berhasil',
-            `Pembayaran pesanan #${trx.order_id} telah berhasil dikonfirmasi. Penjual akan segera memproses barang Anda.`,
+            buyerPaidMsg,
             trx.order_id,
         ]);
         await connection.commit();
@@ -62,8 +65,9 @@ async function settleOrderPaid(trx) {
             await pusher_js_1.default.trigger(`user-${trx.user_id}`, 'order-paid', {
                 order_id: trx.order_id,
                 status: 'paid',
+                product_name: productLabel,
                 title: 'Pembayaran Berhasil',
-                message: `Pembayaran pesanan #${trx.order_id} telah berhasil dikonfirmasi. Penjual akan segera memproses barang Anda.`,
+                message: buyerPaidMsg,
             });
             await pusher_js_1.default.trigger(`user-${trx.mitra_user_id}`, 'new-paid-order', {
                 order_id: trx.order_id,
@@ -75,7 +79,13 @@ async function settleOrderPaid(trx) {
         }
         // Push FCM ke perangkat mitra & pembeli (non-blocking).
         void (0, notificationService_js_1.sendPushNotificationToUser)(trx.mitra_user_id, 'Pembayaran Diterima!', `Pesanan #${trx.order_id} telah dibayar lunas sebesar Rp ${Number(trx.total_amount || 0).toLocaleString('id-ID')}. Segera proses pesanan ini.`, { type: 'order', route: '/profile', order_id: String(trx.order_id), status: 'paid' });
-        void (0, notificationService_js_1.sendPushNotificationToUser)(trx.user_id, 'Pembayaran Berhasil', `Pembayaran pesanan #${trx.order_id} telah berhasil dikonfirmasi. Penjual akan segera memproses barang Anda.`, { type: 'order', route: '/profile', order_id: String(trx.order_id), status: 'paid' });
+        void (0, notificationService_js_1.sendPushNotificationToUser)(trx.user_id, 'Pembayaran Berhasil', buyerPaidMsg, {
+            type: 'order',
+            route: `/profile?tab=Dikemas&trackOrderId=${trx.order_id}`,
+            order_id: String(trx.order_id),
+            status: 'paid',
+            product_name: productLabel,
+        });
         console.log(`✅ [settleOrderPaid] Pesanan #${trx.order_id} ditandai LUNAS.`);
         return true;
     }

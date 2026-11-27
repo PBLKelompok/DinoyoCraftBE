@@ -7,6 +7,7 @@
 import pool from '../config/database.js';
 import { sendPushNotificationToUser } from './notificationService.js';
 import pusher from '../utils/pusher.js';
+import { getOrderProductSummary } from '../utils/orderProductLabel.js';
 
 export interface PendingTransactionRow {
   id: number;
@@ -74,6 +75,8 @@ export async function settleOrderPaid(trx: {
     }
 
     const nominal = Number(trx.total_amount || 0).toLocaleString('id-ID');
+    const productLabel = await getOrderProductSummary(trx.order_id, connection);
+    const buyerPaidMsg = `Pembayaran untuk "${productLabel}" telah berhasil dikonfirmasi. Penjual akan segera memproses barang Anda.`;
 
     await connection.query(
       `INSERT INTO notifications (user_id, title, message, type, reference_id)
@@ -92,7 +95,7 @@ export async function settleOrderPaid(trx: {
       [
         trx.user_id,
         'Pembayaran Berhasil',
-        `Pembayaran pesanan #${trx.order_id} telah berhasil dikonfirmasi. Penjual akan segera memproses barang Anda.`,
+        buyerPaidMsg,
         trx.order_id,
       ]
     );
@@ -103,8 +106,9 @@ export async function settleOrderPaid(trx: {
       await pusher.trigger(`user-${trx.user_id}`, 'order-paid', {
         order_id: trx.order_id,
         status: 'paid',
+        product_name: productLabel,
         title: 'Pembayaran Berhasil',
-        message: `Pembayaran pesanan #${trx.order_id} telah berhasil dikonfirmasi. Penjual akan segera memproses barang Anda.`,
+        message: buyerPaidMsg,
       });
       await pusher.trigger(`user-${trx.mitra_user_id}`, 'new-paid-order', {
         order_id: trx.order_id,
@@ -124,8 +128,14 @@ export async function settleOrderPaid(trx: {
     void sendPushNotificationToUser(
       trx.user_id,
       'Pembayaran Berhasil',
-      `Pembayaran pesanan #${trx.order_id} telah berhasil dikonfirmasi. Penjual akan segera memproses barang Anda.`,
-      { type: 'order', route: '/profile', order_id: String(trx.order_id), status: 'paid' }
+      buyerPaidMsg,
+      {
+        type: 'order',
+        route: `/profile?tab=Dikemas&trackOrderId=${trx.order_id}`,
+        order_id: String(trx.order_id),
+        status: 'paid',
+        product_name: productLabel,
+      }
     );
 
     console.log(`✅ [settleOrderPaid] Pesanan #${trx.order_id} ditandai LUNAS.`);
